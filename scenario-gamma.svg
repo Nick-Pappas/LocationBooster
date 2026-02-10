@@ -1,0 +1,84 @@
+<svg width="450" height="580" viewBox="0 0 450 580" xmlns="http://www.w3.org/2000/svg">
+    <!-- Background -->
+    <rect width="450" height="580" fill="#f8f9fa"/>
+    
+    <!-- Title -->
+    <text x="225" y="40" font-family="Arial, sans-serif" font-size="20" font-weight="bold" text-anchor="middle" fill="#2c3e50">
+        Scenario Gamma: a = 2R + E
+    </text>
+    
+    <!-- Main diagram area -->
+    <!-- Center point: (225, 235) -->
+    
+    <!-- Edge Ring (E) - Solid Red -->
+    <!-- R + E = 162.5 + 17.5 = 180px -->
+    <circle cx="225" cy="235" r="180" 
+            fill="#e74c3c" fill-opacity="0.15" stroke="#c0392b" stroke-width="2"/>
+    
+    <!-- Valid circle (radius R = 162.5px) -->
+    <circle cx="225" cy="235" r="162.5" 
+            fill="#3498db" fill-opacity="0.3" stroke="#2980b9" stroke-width="2"/>
+
+    <!-- Imaginary tangent circle at R + E/2 = 171.25px -->
+    <circle cx="225" cy="235" r="171.25" 
+            fill="none" stroke="#95a5a6" stroke-width="1" stroke-dasharray="2,4" opacity="0.6"/>
+    
+    <!-- Bounding box (side = 2R + E = 342.5px) - Solid Black -->
+    <!-- x = 225 - 171.25 = 53.75, y = 235 - 171.25 = 63.75 -->
+    <rect x="53.75" y="63.75" width="342.5" height="342.5" 
+          fill="none" stroke="#000000" stroke-width="3"/>
+    
+    <!-- Center point marker -->
+    <circle cx="225" cy="235" r="4" fill="#e74c3c"/>
+    
+    <!-- Radius labels -->
+    <line x1="225" y1="235" x2="387.5" y2="235" stroke="#2980b9" stroke-width="2"/>
+    <text x="300" y="225" font-family="Arial, sans-serif" font-size="14" fill="#2980b9" font-weight="bold">R</text>
+    
+    <line x1="387.5" y1="235" x2="405" y2="235" stroke="#c0392b" stroke-width="2"/>
+    <text x="392" y="225" font-family="Arial, sans-serif" font-size="14" fill="#c0392b" font-weight="bold">E</text>
+
+    <!-- Show R + E/2 relationship line -->
+    <line x1="225" y1="235" x2="396.25" y2="235" stroke="#95a5a6" stroke-width="1" stroke-dasharray="2,4"/>
+    <text x="310" y="252" font-family="Arial, sans-serif" font-size="11" fill="#7f8c8d" font-style="italic">R + E/2</text>
+    
+    <!-- Square dimension (2R + E) -->
+    <line x1="420" y1="63.75" x2="420" y2="406.25" stroke="#000000" stroke-width="2" marker-start="url(#arrowstart)" marker-end="url(#arrowend)"/>
+    <text x="425" y="240" font-family="Arial, sans-serif" font-size="14" fill="#000000" font-weight="bold">2R + E</text>
+    
+    <!-- Arrow markers -->
+    <defs>
+        <marker id="arrowstart" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
+            <polygon points="10,0 0,5 10,10" fill="#000000"/>
+        </marker>
+        <marker id="arrowend" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
+            <polygon points="0,0 10,5 0,10" fill="#000000"/>
+        </marker>
+    </defs>
+    
+    <!-- Legend box (Vertical layout, circles first, square last) -->
+    <g transform="translate(25, 420)">
+        <rect x="0" y="0" width="400" height="150" fill="white" stroke="#bdc3c7" stroke-width="1" rx="3"/>
+        
+        <!-- Legend Header -->
+        <text x="200" y="25" font-family="Arial, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#2c3e50">
+            Square tangent to R + E/2 (side = 2R + E)
+        </text>
+        
+        <!-- Item 1: Valid Inland -->
+        <circle cx="25" cy="50" r="8" fill="#3498db" fill-opacity="0.3" stroke="#2980b9" stroke-width="2"/>
+        <text x="45" y="55" font-family="Arial, sans-serif" font-size="13" fill="#34495e">Valid inland region (radius R)</text>
+
+        <!-- Item 2: Edge Exclusion -->
+        <circle cx="25" cy="78" r="8" fill="#e74c3c" fill-opacity="0.15" stroke="#c0392b" stroke-width="2"/>
+        <text x="45" y="83" font-family="Arial, sans-serif" font-size="13" fill="#34495e">Edge exclusion zone (solid ring)</text>
+
+        <!-- Item 3: R+E/2 Circle -->
+        <circle cx="25" cy="106" r="8" fill="none" stroke="#95a5a6" stroke-width="1" stroke-dasharray="2,4"/>
+        <text x="45" y="111" font-family="Arial, sans-serif" font-size="13" fill="#7f8c8d">R + E/2 imaginary circle (tangent)</text>
+        
+        <!-- Item 4: Bounding Box -->
+        <rect x="17" y="125" width="16" height="16" fill="none" stroke="#000000" stroke-width="2"/>
+        <text x="45" y="138" font-family="Arial, sans-serif" font-size="13" fill="#34495e">Bounding box (sampling area)</text>
+    </g>
+</svg>
