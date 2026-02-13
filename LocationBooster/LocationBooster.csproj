@@ -13,6 +13,9 @@
   </Target>
 
   <ItemGroup>
+    <Reference Include="assembly_utils">
+      <HintPath>..\..\Libs\assembly_utils.dll</HintPath>
+    </Reference>
     <Reference Include="BepInEx">
       <HintPath>..\..\Libs\BepInEx.dll</HintPath>
       <Private>false</Private>
