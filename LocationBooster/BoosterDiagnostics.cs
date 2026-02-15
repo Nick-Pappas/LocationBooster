@@ -16,13 +16,11 @@ namespace LocationBudgetBooster
         public static Dictionary<int, Dictionary<Heightmap.Biome, long>> BiomeFailures = new Dictionary<int, Dictionary<Heightmap.Biome, long>>();
         public static Dictionary<int, Dictionary<Heightmap.BiomeArea, long>> BiomeAreaFailures = new Dictionary<int, Dictionary<Heightmap.BiomeArea, long>>();
 
-        // Simple counters
-        public static Dictionary<int, long> AltitudeTooHigh = new Dictionary<int, long>();
-        public static Dictionary<int, long> AltitudeTooLow = new Dictionary<int, long>();
-        public static Dictionary<int, long> DistanceTooClose = new Dictionary<int, long>();
-        public static Dictionary<int, long> DistanceTooFar = new Dictionary<int, long>();
+        // Simple counters -> Now Nested for Context
+        public static Dictionary<int, Dictionary<Heightmap.Biome, long>> AltitudeTooHigh = new Dictionary<int, Dictionary<Heightmap.Biome, long>>();
+        public static Dictionary<int, Dictionary<Heightmap.Biome, long>> AltitudeTooLow = new Dictionary<int, Dictionary<Heightmap.Biome, long>>();
 
-        // Detailed Stats Trackers
+        // Detailed Stats Trackers -> Now Nested for Context
         public class AltitudeStat
         {
             public float Min = float.MaxValue;
@@ -45,8 +43,12 @@ namespace LocationBudgetBooster
             }
         }
 
-        public static Dictionary<int, AltitudeStat> AltLowStats = new Dictionary<int, AltitudeStat>();
-        public static Dictionary<int, AltitudeStat> AltHighStats = new Dictionary<int, AltitudeStat>();
+        public static Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>> AltLowStats = new Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>>();
+        public static Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>> AltHighStats = new Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>>();
+
+        // Distance remains simple for now
+        public static Dictionary<int, long> DistanceTooClose = new Dictionary<int, long>();
+        public static Dictionary<int, long> DistanceTooFar = new Dictionary<int, long>();
 
         public static Dictionary<int, Dictionary<string, long>> ShadowCounters = new Dictionary<int, Dictionary<string, long>>();
 
@@ -110,24 +112,31 @@ namespace LocationBudgetBooster
             BiomeAreaFailures[hash][__result]++;
         }
 
-        public static void TrackAltitudeFailure(object instance, float height, float minAlt, float maxAlt)
+        public static void TrackAltitudeFailure(object instance, float height, float minAlt, float maxAlt, Vector3 point)
         {
             int hash = instance.GetHashCode();
+            // Resolve the biome here in C# since passing it from IL is messy
+            Heightmap.Biome biome = WorldGenerator.instance.GetBiome(point);
+
             if (height > maxAlt)
             {
-                if (!AltitudeTooHigh.ContainsKey(hash)) AltitudeTooHigh[hash] = 0;
-                AltitudeTooHigh[hash]++;
+                if (!AltitudeTooHigh.ContainsKey(hash)) AltitudeTooHigh[hash] = new Dictionary<Heightmap.Biome, long>();
+                if (!AltitudeTooHigh[hash].ContainsKey(biome)) AltitudeTooHigh[hash][biome] = 0;
+                AltitudeTooHigh[hash][biome]++;
 
-                if (!AltHighStats.ContainsKey(hash)) AltHighStats[hash] = new AltitudeStat();
-                AltHighStats[hash].Add(height);
+                if (!AltHighStats.ContainsKey(hash)) AltHighStats[hash] = new Dictionary<Heightmap.Biome, AltitudeStat>();
+                if (!AltHighStats[hash].ContainsKey(biome)) AltHighStats[hash][biome] = new AltitudeStat();
+                AltHighStats[hash][biome].Add(height);
             }
             else if (height < minAlt)
             {
-                if (!AltitudeTooLow.ContainsKey(hash)) AltitudeTooLow[hash] = 0;
-                AltitudeTooLow[hash]++;
+                if (!AltitudeTooLow.ContainsKey(hash)) AltitudeTooLow[hash] = new Dictionary<Heightmap.Biome, long>();
+                if (!AltitudeTooLow[hash].ContainsKey(biome)) AltitudeTooLow[hash][biome] = 0;
+                AltitudeTooLow[hash][biome]++;
 
-                if (!AltLowStats.ContainsKey(hash)) AltLowStats[hash] = new AltitudeStat();
-                AltLowStats[hash].Add(height);
+                if (!AltLowStats.ContainsKey(hash)) AltLowStats[hash] = new Dictionary<Heightmap.Biome, AltitudeStat>();
+                if (!AltLowStats[hash].ContainsKey(biome)) AltLowStats[hash][biome] = new AltitudeStat();
+                AltLowStats[hash][biome].Add(height);
             }
         }
 

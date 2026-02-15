@@ -291,8 +291,11 @@ namespace LocationBudgetBooster
                         // Altitude tracking
                         if (errField.Name.Contains("errorAlt"))
                         {
-                            if (verbose) BoosterDiagnostics.WriteLog($"   [Track] Found errorAlt increment at IL_{i:D4}, searching for altitude local...");
+                            if (verbose) BoosterDiagnostics.WriteLog($"   [Track] Found errorAlt increment at IL_{i:D4}, searching for altitude AND point locals...");
                             LocalBuilder altLocal = null;
+                            LocalBuilder pointLocal = null;
+
+                            // 1. Find the altitude (float) local - usually close
                             for (int lookback = 1; lookback <= 15 && i - lookback >= 0; lookback++)
                             {
                                 var prevCode = codes[i - lookback];
@@ -305,7 +308,21 @@ namespace LocationBudgetBooster
                                 }
                             }
 
-                            if (altLocal != null && BoosterReflection.LocationFields.ContainsKey(currentType))
+                            // 2. Find the point (Vector3) local - further back
+                            // We look for any Ldloc of type Vector3 in the preceding 40 instructions
+                            for (int lookback = 1; lookback <= 40 && i - lookback >= 0; lookback++)
+                            {
+                                var prevCode = codes[i - lookback];
+                                if ((prevCode.opcode == OpCodes.Ldloc_S || prevCode.opcode == OpCodes.Ldloc || prevCode.opcode == OpCodes.Ldloca_S) &&
+                                    prevCode.operand is LocalBuilder lb &&
+                                    lb.LocalType == typeof(Vector3))
+                                {
+                                    pointLocal = lb;
+                                    break; // Assume the most recent Vector3 usage is the point
+                                }
+                            }
+
+                            if (altLocal != null && pointLocal != null && BoosterReflection.LocationFields.ContainsKey(currentType))
                             {
                                 yield return new CodeInstruction(OpCodes.Ldarg_0);
                                 yield return new CodeInstruction(OpCodes.Ldloc_S, altLocal);
@@ -315,8 +332,13 @@ namespace LocationBudgetBooster
                                 yield return new CodeInstruction(OpCodes.Ldarg_0);
                                 yield return new CodeInstruction(OpCodes.Ldfld, BoosterReflection.LocationFields[currentType]);
                                 yield return new CodeInstruction(OpCodes.Ldfld, AccessTools.Field(typeof(ZoneLocation), "m_maxAltitude"));
+                                yield return new CodeInstruction(OpCodes.Ldloc_S, pointLocal); // Pass the point!
                                 yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.TrackAltitudeFailure)));
                                 if (verbose) BoosterDiagnostics.WriteLog($"   [Track] Injected altitude tracking at IL_{i:D4}");
+                            }
+                            else if (verbose)
+                            {
+                                BoosterDiagnostics.WriteLog($"   [Track] Failed to find locals for Altitude check. Alt: {altLocal != null}, Point: {pointLocal != null}");
                             }
                         }
 

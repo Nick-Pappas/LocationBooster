@@ -280,16 +280,44 @@ namespace LocationBudgetBooster
 
         private static void PrintAlt(StringBuilder sb, string prefix, int hash)
         {
-            if (BoosterDiagnostics.AltitudeTooLow.TryGetValue(hash, out long low) && low > 0)
+            // Print Low Failures
+            if (BoosterDiagnostics.AltitudeTooLow.TryGetValue(hash, out var lowDict))
             {
-                string stats = BoosterDiagnostics.AltLowStats.TryGetValue(hash, out var s) ? s.GetString() : "";
-                sb.AppendLine($"{prefix}Too Low: {low:N0} {stats}");
+                long totalLow = lowDict.Values.Sum();
+                if (totalLow > 0)
+                {
+                    sb.AppendLine($"{prefix}Too Low: {totalLow:N0}");
+                    foreach (var kvp in lowDict.OrderByDescending(x => x.Value))
+                    {
+                        var biome = kvp.Key;
+                        string stats = "";
+                        if (BoosterDiagnostics.AltLowStats.TryGetValue(hash, out var statDict) && statDict.TryGetValue(biome, out var s))
+                        {
+                            stats = s.GetString();
+                        }
+                        sb.AppendLine($"{prefix}   └─ {biome}: {kvp.Value:N0} {stats}");
+                    }
+                }
             }
 
-            if (BoosterDiagnostics.AltitudeTooHigh.TryGetValue(hash, out long high) && high > 0)
+            // Print High Failures
+            if (BoosterDiagnostics.AltitudeTooHigh.TryGetValue(hash, out var highDict))
             {
-                string stats = BoosterDiagnostics.AltHighStats.TryGetValue(hash, out var s) ? s.GetString() : "";
-                sb.AppendLine($"{prefix}Too High: {high:N0} {stats}");
+                long totalHigh = highDict.Values.Sum();
+                if (totalHigh > 0)
+                {
+                    sb.AppendLine($"{prefix}Too High: {totalHigh:N0}");
+                    foreach (var kvp in highDict.OrderByDescending(x => x.Value))
+                    {
+                        var biome = kvp.Key;
+                        string stats = "";
+                        if (BoosterDiagnostics.AltHighStats.TryGetValue(hash, out var statDict) && statDict.TryGetValue(biome, out var s))
+                        {
+                            stats = s.GetString();
+                        }
+                        sb.AppendLine($"{prefix}   └─ {biome}: {kvp.Value:N0} {stats}");
+                    }
+                }
             }
         }
     }
