@@ -15,337 +15,260 @@ namespace LocationBudgetBooster
         public static HashSet<string> PatchedTypes = new HashSet<string>();
         private static HashSet<string> _transpiledMethods = new HashSet<string>();
         private static bool _insideGetRandomZone = false;
+        private static string _lastLoggedLocation = "";
 
-        public static bool ScanForTarget(MethodInfo method)
+        public static bool ScanForInnerLoop(MethodInfo method)
         {
-            try
-            {
-                var instructions = PatchProcessor.GetOriginalInstructions(method);
-                return instructions.Any(x => x.opcode == OpCodes.Ldc_I4 && (x.operand is int v && (v == 100000 || v == 200000)));
-            }
+            try { return PatchProcessor.GetOriginalInstructions(method).Any(x => x.opcode == OpCodes.Call && x.operand is MethodInfo mi && mi.Name == "GetRandomPointInZone"); }
             catch { return false; }
+        }
+
+        public static bool ScanForOuterLoop(MethodInfo method)
+        {
+            try { return PatchProcessor.GetOriginalInstructions(method).Any(x => x.opcode == OpCodes.Stfld && x.operand is FieldInfo fi && fi.Name == "m_estimatedGenerateLocationsCompletionTime"); }
+            catch { return false; }
+        }
+
+        public static void ResetAndPrepareForNewLocation()
+        {
+            BoosterSurvey.SurveyExhausted = false;
+            BoosterDiagnostics.ResetInnerLoopCounter();
+        }
+
+        public static bool InnerLoopPrefix(object __instance, ref bool __result)
+        {
+            if (BoosterSurvey.SurveyExhausted)
+            {
+                if (BoosterReflection.IterationsPkgField != null)
+                {
+                    try
+                    {
+                        var pkg = BoosterReflection.IterationsPkgField.GetValue(__instance) as ZPackage;
+                        if (pkg != null)
+                        {
+                            pkg.Clear();
+                            pkg.Write(0);
+                            pkg.SetPos(0);
+                        }
+                    }
+                    catch { }
+                }
+
+                BoosterDiagnostics.ReportFailure(__instance);
+
+                __result = false;
+                return false;
+            }
+            return true;
         }
 
         public static bool GetRandomZonePrefix(ref Vector2i __result, float range)
         {
             BoosterDiagnostics.FilterTotalCalls++;
-
-            // Recursion guard
             if (_insideGetRandomZone) return true;
 
-            // 1. Check Mode
             var mode = LocationBooster.Mode.Value;
             if (mode == BoosterMode.Vanilla) return true;
 
-            // 2. Check Target
             var currentLoc = BoosterReflection.CurrentLocationForFilter;
+            if (currentLoc == null) return true;
+
             string target = LocationBooster.FilterTarget.Value;
+            bool isGlobalMode = string.IsNullOrWhiteSpace(target);
+            if (!isGlobalMode && currentLoc.m_prefabName != target) return true;
 
-            if (currentLoc == null || string.IsNullOrEmpty(target)) return true;
-            if (currentLoc.m_prefabName != target) return true;
+            if (LocationBooster.DiagnosticMode.Value && currentLoc.m_prefabName != _lastLoggedLocation)
+            {
+                BoosterDiagnostics.WriteTimestampedLog($"Applying '{mode}' mode to {currentLoc.m_prefabName}");
+                _lastLoggedLocation = currentLoc.m_prefabName;
+            }
 
-            // 3. Execute Strategy
             try
             {
                 _insideGetRandomZone = true;
-
                 float min = currentLoc.m_minDistance;
-                float max = currentLoc.m_maxDistance;
-                // Fallback to max range if location doesn't specify
-                if (max <= 0.1f) max = LocationBooster.WorldRadius.Value;
+                float max = currentLoc.m_maxDistance > 0.1f ? currentLoc.m_maxDistance : LocationBooster.WorldRadius.Value;
 
-                if (mode == BoosterMode.Force)
-                {
-                    __result = BoosterForce.GenerateDonut(min, max);
-                    BoosterDiagnostics.FilterAcceptedZones++;
-                }
-                else if (mode == BoosterMode.Filter)
-                {
-                    __result = BoosterFilter.GenerateSieve(min, max, LocationBooster.WorldRadius.Value);
-                    BoosterDiagnostics.FilterAcceptedZones++;
-                }
+                if (mode == BoosterMode.Force) { __result = BoosterForce.GenerateDonut(min, max); BoosterDiagnostics.FilterAcceptedZones++; return false; }
+                if (mode == BoosterMode.Filter) { __result = BoosterFilter.GenerateSieve(min, max, LocationBooster.WorldRadius.Value); BoosterDiagnostics.FilterAcceptedZones++; return false; }
 
-                return false; // Skip vanilla
+                if (mode == BoosterMode.Survey)
+                {
+                    if (BoosterSurvey.GetZone(currentLoc, out Vector2i surveyResult))
+                    {
+                        __result = surveyResult; BoosterDiagnostics.FilterAcceptedZones++; return false;
+                    }
+                    else
+                    {
+                        __result = BoosterReflection.CachedOccupiedZone ?? Vector2i.zero;
+                        return false;
+                    }
+                }
+                return true;
             }
-            finally
+            finally { _insideGetRandomZone = false; }
+        }
+
+        public static IEnumerable<CodeInstruction> OuterLoopTranspiler(IEnumerable<CodeInstruction> instructions)
+        {
+            var codes = instructions.ToList();
+            for (int i = 0; i < codes.Count; i++)
             {
-                _insideGetRandomZone = false;
+                yield return codes[i];
+                if (codes[i].opcode == OpCodes.Stfld && codes[i].operand is FieldInfo fi && fi.FieldType == typeof(ZoneLocation))
+                {
+                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterPatches), nameof(BoosterPatches.ResetAndPrepareForNewLocation)));
+                }
             }
         }
 
-        public static IEnumerable<CodeInstruction> BoosterTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original, ILGenerator generator)
+        public static IEnumerable<CodeInstruction> InnerLoopTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
         {
             var codes = instructions.ToList();
-            int outerMult = LocationBooster.OuterMultiplier.Value;
-            int innerMult = LocationBooster.InnerMultiplier.Value;
-            string lastLogString = "";
             Type currentType = original.DeclaringType;
             string methodKey = $"{currentType.Name}::{original.Name}";
-            bool verbose = !_transpiledMethods.Contains(methodKey);
 
-            if (verbose)
-            {
-                BoosterDiagnostics.WriteLog($"--- Transpiling {codes.Count} instructions for {currentType.Name} ---");
-                _transpiledMethods.Add(methodKey);
-            }
+            string lastLogString = "";
+            FieldInfo limitFieldFound = null;
 
-            // Unconditional search for GetRandomZone to inject context capture
-            int getRandomZoneIndex = -1;
+            // --- PASS 1: Pre-scan ---
             for (int i = 0; i < codes.Count; i++)
             {
-                if (codes[i].opcode == OpCodes.Call && codes[i].operand is MethodInfo mi && mi.Name == "GetRandomZone")
+                var instruction = codes[i];
+
+                if (instruction.opcode == OpCodes.Ldfld && instruction.operand is FieldInfo fiPkg && fiPkg.FieldType == typeof(ZPackage)) BoosterReflection.IterationsPkgField = fiPkg;
+                if (instruction.opcode == OpCodes.Ldfld && instruction.operand is FieldInfo fi)
                 {
-                    getRandomZoneIndex = i;
-                    if (verbose) BoosterDiagnostics.WriteLog($"   [DistFilter] Found GetRandomZone at IL_{i:D4}");
-                    break;
+                    if (fi.FieldType == typeof(ZoneLocation)) BoosterReflection.LocationFields[currentType] = fi;
+                    if (fi.FieldType == typeof(Vector2i) && fi.Name.Contains("zoneID")) BoosterReflection.ZoneIDFields[currentType] = fi;
+                }
+                if (instruction.opcode == OpCodes.Ldc_I4 && instruction.operand is int val && (val == 100000 || val == 200000))
+                {
+                    for (int k = 1; k <= 5 && i + k < codes.Count; k++)
+                    {
+                        if (codes[i + k].opcode == OpCodes.Stfld) { limitFieldFound = codes[i + k].operand as FieldInfo; BoosterReflection.LimitFields[currentType] = limitFieldFound; break; }
+                    }
+                }
+                if (instruction.opcode == OpCodes.Ldfld && limitFieldFound != null && instruction.operand == limitFieldFound && i >= 2 && codes[i - 2].opcode == OpCodes.Ldfld)
+                {
+                    BoosterReflection.CounterFields[currentType] = codes[i - 2].operand as FieldInfo;
+                }
+                if (instruction.opcode == OpCodes.Call && instruction.operand is MethodInfo mi && mi.Name == "CountNrOfLocation" && i + 1 < codes.Count && codes[i + 1].opcode == OpCodes.Stfld)
+                {
+                    BoosterReflection.PlacedFields[currentType] = codes[i + 1].operand as FieldInfo;
+                }
+                if (instruction.opcode == OpCodes.Ldc_I4_S && Convert.ToInt32(instruction.operand) == 20)
+                {
+                    if (i > 0 && codes[i - 1].opcode == OpCodes.Ldfld) BoosterReflection.InnerCounterFields[currentType] = codes[i - 1].operand as FieldInfo;
+                }
+                if (instruction.opcode == OpCodes.Ldstr && instruction.operand is string s && s.StartsWith("error")) lastLogString = s.Trim();
+                if (instruction.opcode == OpCodes.Ldflda && !string.IsNullOrEmpty(lastLogString) && lastLogString.StartsWith("error"))
+                {
+                    if (instruction.operand is FieldInfo f) BoosterReflection.ErrorFields[lastLogString] = f;
+                    lastLogString = "";
                 }
             }
 
-            FieldInfo maxRangeField = null;
+            // --- PASS 2: Modify ---
+            int outerMult = LocationBooster.OuterMultiplier.Value;
+            int innerMult = LocationBooster.InnerMultiplier.Value;
+            int getRandomZoneIndex = codes.FindIndex(c => c.opcode == OpCodes.Call && c.operand is MethodInfo mi && mi.Name == "GetRandomZone");
 
             for (int i = 0; i < codes.Count; i++)
             {
-                var opcode = codes[i].opcode;
-                var operand = codes[i].operand;
+                var instruction = codes[i];
+                var opcode = instruction.opcode;
+                var operand = instruction.operand;
 
-                // 1. Capture Location Field
-                if (opcode == OpCodes.Ldfld && operand is FieldInfo fi && fi.FieldType == typeof(ZoneLocation))
-                {
-                    if (!BoosterReflection.LocationFields.ContainsKey(currentType)) BoosterReflection.LocationFields[currentType] = fi;
-                }
-
-                // 1a. Capture ZoneID Field
-                if (opcode == OpCodes.Ldfld && operand is FieldInfo fiZone && fiZone.FieldType == typeof(Vector2i) && fiZone.Name.Contains("zoneID"))
-                {
-                    if (!BoosterReflection.ZoneIDFields.ContainsKey(currentType))
-                    {
-                        BoosterReflection.ZoneIDFields[currentType] = fiZone;
-                        if (verbose) BoosterDiagnostics.WriteLog($"   [Reflect] Captured ZoneID: {fiZone.Name}");
-                    }
-                }
-
-                // 2. Capture Placed Field
-                if (opcode == OpCodes.Call && operand is MethodInfo mi && mi.Name == "CountNrOfLocation")
-                {
-                    if (i + 1 < codes.Count && codes[i + 1].opcode == OpCodes.Stfld)
-                    {
-                        var pField = codes[i + 1].operand as FieldInfo;
-                        if (!BoosterReflection.PlacedFields.ContainsKey(currentType))
-                        {
-                            BoosterReflection.PlacedFields[currentType] = pField;
-                            if (verbose) BoosterDiagnostics.WriteLog($"   [Reflect] Captured Placed Count: {pField.Name}");
-                        }
-                    }
-                }
-
-                // 3. Outer Loop Boost & Budget Field Capture
+                // 1. REPLACEMENTS
                 if (opcode == OpCodes.Ldc_I4 && operand is int val && (val == 100000 || val == 200000))
                 {
-                    if (verbose) BoosterDiagnostics.WriteLog($"   [Outer] Boosting {val} at IL_{i:D4}");
-                    yield return codes[i];
+                    yield return instruction;
                     yield return new CodeInstruction(OpCodes.Ldc_I4, outerMult);
                     yield return new CodeInstruction(OpCodes.Mul);
-
-                    if (i + 1 < codes.Count && codes[i + 1].opcode == OpCodes.Stfld)
-                    {
-                        var limitField = codes[i + 1].operand as FieldInfo;
-                        if (!BoosterReflection.LimitFields.ContainsKey(currentType))
-                        {
-                            BoosterReflection.LimitFields[currentType] = limitField;
-                            if (verbose) BoosterDiagnostics.WriteLog($"   [Reflect] Captured Budget Limit: {limitField.Name}");
-                        }
-                    }
                     continue;
                 }
-
-                // 3a. Capture maxRange field
-                if (opcode == OpCodes.Ldc_R4 && operand is float fval && fval == 10000f)
-                {
-                    if (i + 1 < codes.Count && codes[i + 1].opcode == OpCodes.Stfld && codes[i + 1].operand is FieldInfo maxRangeFi)
-                    {
-                        maxRangeField = maxRangeFi;
-                        if (verbose) BoosterDiagnostics.WriteLog($"   [MaxRange] Found maxRange field at IL_{i:D4}: {maxRangeFi.Name}");
-                    }
-                }
-
-                // 3b. Inject maxRange clamping
-                if (opcode == OpCodes.Ldfld && operand is FieldInfo ldfldFi && maxRangeField != null && ldfldFi == maxRangeField)
-                {
-                    if (i + 1 < codes.Count && codes[i + 1].opcode == OpCodes.Call &&
-                        codes[i + 1].operand is MethodInfo nextMi && nextMi.Name == "GetRandomZone")
-                    {
-                        if (BoosterReflection.LocationFields.ContainsKey(currentType))
-                        {
-                            if (verbose) BoosterDiagnostics.WriteLog($"   [MaxRange] Injecting clamping before GetRandomZone at IL_{i:D4}");
-
-                            var skipLabel = generator.DefineLabel();
-
-                            yield return new CodeInstruction(OpCodes.Ldarg_0);
-                            yield return new CodeInstruction(OpCodes.Ldfld, BoosterReflection.LocationFields[currentType]);
-                            yield return new CodeInstruction(OpCodes.Ldfld, AccessTools.Field(typeof(ZoneLocation), "m_maxDistance"));
-                            yield return new CodeInstruction(OpCodes.Ldc_R4, 0f);
-                            yield return new CodeInstruction(OpCodes.Ble_Un, skipLabel);
-
-                            yield return new CodeInstruction(OpCodes.Ldarg_0);
-                            yield return new CodeInstruction(OpCodes.Ldarg_0);
-                            yield return new CodeInstruction(OpCodes.Ldfld, maxRangeField);
-                            yield return new CodeInstruction(OpCodes.Ldarg_0);
-                            yield return new CodeInstruction(OpCodes.Ldfld, BoosterReflection.LocationFields[currentType]);
-                            yield return new CodeInstruction(OpCodes.Ldfld, AccessTools.Field(typeof(ZoneLocation), "m_maxDistance"));
-                            yield return new CodeInstruction(OpCodes.Ldc_R4, 64f);
-                            yield return new CodeInstruction(OpCodes.Add);
-                            yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(Mathf), nameof(Mathf.Min), new[] { typeof(float), typeof(float) }));
-                            yield return new CodeInstruction(OpCodes.Stfld, maxRangeField);
-
-                            if (LocationBooster.DiagnosticMode.Value)
-                            {
-                                yield return new CodeInstruction(OpCodes.Ldarg_0);
-                                yield return new CodeInstruction(OpCodes.Ldfld, BoosterReflection.LocationFields[currentType]);
-                                yield return new CodeInstruction(OpCodes.Ldarg_0);
-                                yield return new CodeInstruction(OpCodes.Ldfld, maxRangeField);
-                                yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.LogMaxRangeClamping)));
-                            }
-
-                            codes[i].labels.Add(skipLabel);
-                            if (verbose) BoosterDiagnostics.WriteLog($"   [MaxRange] Clamping complete");
-                        }
-                    }
-                }
-
-                // 4. Capture Loop Counter
-                if (BoosterReflection.LimitFields.ContainsKey(currentType) && opcode == OpCodes.Ldfld && operand is FieldInfo fi2 && fi2 == BoosterReflection.LimitFields[currentType])
-                {
-                    if (i >= 2 && codes[i - 2].opcode == OpCodes.Ldfld)
-                    {
-                        var counterField = codes[i - 2].operand as FieldInfo;
-                        if (!BoosterReflection.CounterFields.ContainsKey(currentType))
-                        {
-                            BoosterReflection.CounterFields[currentType] = counterField;
-                            if (verbose) BoosterDiagnostics.WriteLog($"   [Reflect] Captured Loop Counter: {counterField.Name}");
-                        }
-                    }
-                }
-
-                // 5. Location Context Capture
-                if (getRandomZoneIndex >= 0 && i == getRandomZoneIndex)
-                {
-                    if (BoosterReflection.LocationFields.ContainsKey(currentType))
-                    {
-                        yield return new CodeInstruction(OpCodes.Ldarg_0);
-                        yield return new CodeInstruction(OpCodes.Ldfld, BoosterReflection.LocationFields[currentType]);
-                        yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterReflection), nameof(BoosterReflection.SetCurrentLocation)));
-                        if (verbose) BoosterDiagnostics.WriteLog($"   [Context] Injected location context capture at IL_{i:D4} (field={BoosterReflection.LocationFields[currentType].Name})");
-                    }
-                }
-
-                // 5b. Inject Global Altitude Profiling
-                // Look for the constant 30 followed by a subtraction and a float store
-                if (opcode == OpCodes.Ldc_R8 && operand is double dval && dval == 30.0)
-                {
-                    for (int j = i + 1; j < i + 10 && j < codes.Count; j++)
-                    {
-                        if ((codes[j].opcode == OpCodes.Stloc || codes[j].opcode == OpCodes.Stloc_S) && codes[j].operand is LocalBuilder lb && lb.LocalType == typeof(float))
-                        {
-                            // We found the altitude local! Let's inject after the store.
-                            // We yield everything up to and including the stloc first.
-                            while (i <= j)
-                            {
-                                yield return codes[i];
-                                i++;
-                            }
-
-                            // Now inject the global tracker call
-                            yield return new CodeInstruction(OpCodes.Ldloc_S, lb);
-                            yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.TrackGlobalAltitude)));
-
-                            if (verbose) BoosterDiagnostics.WriteLog($"   [Global] Injected global altitude tracking after IL_{j:D4}");
-                            // Decrement i because the outer loop will increment it again
-                            i--;
-                            goto next_instr;
-                        }
-                    }
-                }
-
-                // 6. Progress Heartbeat Injection
-                if (LocationBooster.ProgressInterval.Value > 0 && BoosterReflection.CounterFields.ContainsKey(currentType) &&
-                    opcode == OpCodes.Stfld && operand is FieldInfo fi3 && fi3 == BoosterReflection.CounterFields[currentType])
-                {
-                    if (LocationBooster.DiagnosticMode.Value || verbose)
-                        BoosterDiagnostics.WriteLog($"   [Heartbeat] Matched stfld {fi3.Name} at IL_{i:D4}, injecting LogProgress");
-
-                    yield return codes[i];
-
-                    yield return new CodeInstruction(OpCodes.Ldarg_0);
-                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.LogProgress)));
-
-                    if (verbose) BoosterDiagnostics.WriteLog($"   [Heartbeat] Injected progress logging at IL_{i:D4}");
-                    continue;
-                }
-
-                // 7. Inner Loop Boost
                 if (opcode == OpCodes.Ldc_I4_S && Convert.ToInt32(operand) == 20)
                 {
-                    bool prevIsLoad = i > 0 && codes[i - 1].opcode == OpCodes.Ldfld;
-                    bool nextIsBranch = i + 1 < codes.Count && (
-                        codes[i + 1].opcode == OpCodes.Blt || codes[i + 1].opcode == OpCodes.Blt_S ||
-                        codes[i + 1].opcode == OpCodes.Ble || codes[i + 1].opcode == OpCodes.Ble_S ||
-                        codes[i + 1].opcode == OpCodes.Bge || codes[i + 1].opcode == OpCodes.Bge_S
-                    );
-
-                    if (prevIsLoad && nextIsBranch)
+                    if (i > 0 && codes[i - 1].opcode == OpCodes.Ldfld)
                     {
-                        if (verbose) BoosterDiagnostics.WriteLog($"   [Inner] Boosting loop count 20 at IL_{i:D4}");
                         yield return new CodeInstruction(OpCodes.Ldc_I4, 20 * innerMult);
                         continue;
                     }
                 }
 
-                // 8. Hook Success
-                if (opcode == OpCodes.Call && operand is MethodInfo miReg && miReg.Name == "RegisterLocation")
+                // 2. INJECTIONS
+                if (i == getRandomZoneIndex)
                 {
-                    yield return codes[i];
                     yield return new CodeInstruction(OpCodes.Ldarg_0);
-                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.ReportSuccess)));
-                    continue;
+                    yield return new CodeInstruction(OpCodes.Ldfld, BoosterReflection.LocationFields[currentType]);
+                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterReflection), nameof(BoosterReflection.SetCurrentLocation)));
                 }
 
-                // 9. Altitude/Distance Tracking Injection
+                if (opcode == OpCodes.Ldc_R4 && operand is float fval && fval == 30f)
+                {
+                    for (int j = i + 1; j < i + 10 && j < codes.Count; j++)
+                    {
+                        if ((codes[j].opcode == OpCodes.Stloc || codes[j].opcode == OpCodes.Stloc_S) && codes[j].operand is LocalBuilder lb && lb.LocalType == typeof(float))
+                        {
+                            yield return instruction;
+                            int k = i + 1;
+                            while (k <= j) { yield return codes[k]; k++; }
+
+                            yield return new CodeInstruction(OpCodes.Ldloc_S, lb);
+                            yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.TrackGlobalAltitude)));
+
+                            i = j;
+                            goto next_instr;
+                        }
+                    }
+                }
+
+                yield return instruction;
+
+                // Progress Log
+                if (opcode == OpCodes.Stfld && BoosterReflection.CounterFields.TryGetValue(currentType, out var cf) && operand == cf)
+                {
+                    if (LocationBooster.ProgressInterval.Value > 0)
+                    {
+                        yield return new CodeInstruction(OpCodes.Ldarg_0);
+                        yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.LogProgress)));
+                    }
+                }
+
+                // Heartbeat Log
+                if (opcode == OpCodes.Call && operand is MethodInfo miRP && miRP.Name == "GetRandomPointInZone")
+                {
+                    yield return new CodeInstruction(OpCodes.Ldarg_0);
+                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.LogInnerLoopProgress)));
+                }
+
+                if (opcode == OpCodes.Call && operand is MethodInfo miReg && miReg.Name == "RegisterLocation")
+                {
+                    yield return new CodeInstruction(OpCodes.Ldarg_0);
+                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.ReportSuccess)));
+                }
+
+                if (opcode == OpCodes.Ldstr && operand is string str && str.Contains("Failed to place all"))
+                {
+                    yield return new CodeInstruction(OpCodes.Ldarg_0);
+                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.ReportFailure)));
+                }
+
                 if (opcode == OpCodes.Ldfld && operand is FieldInfo errField)
                 {
-                    if (i + 3 < codes.Count &&
-                        codes[i + 1].opcode == OpCodes.Ldc_I4_1 &&
-                        codes[i + 2].opcode == OpCodes.Add)
+                    if (i + 3 < codes.Count && codes[i + 1].opcode == OpCodes.Ldc_I4_1 && codes[i + 2].opcode == OpCodes.Add)
                     {
-                        // Altitude tracking
                         if (errField.Name.Contains("errorAlt"))
                         {
-                            if (verbose) BoosterDiagnostics.WriteLog($"   [Track] Found errorAlt increment at IL_{i:D4}, searching for altitude AND point locals...");
-                            LocalBuilder altLocal = null;
-                            LocalBuilder pointLocal = null;
-
-                            // Find the altitude (float) local
-                            for (int lookback = 1; lookback <= 15 && i - lookback >= 0; lookback++)
+                            LocalBuilder altLocal = null, pointLocal = null;
+                            for (int x = 1; x <= 40 && i - x >= 0; x++)
                             {
-                                var prevCode = codes[i - lookback];
-                                if ((prevCode.opcode == OpCodes.Ldloc_S || prevCode.opcode == OpCodes.Ldloc) &&
-                                    prevCode.operand is LocalBuilder lb &&
-                                    lb.LocalType == typeof(float))
+                                if (codes[i - x].operand is LocalBuilder lb)
                                 {
-                                    altLocal = lb;
-                                    break;
-                                }
-                            }
-
-                            // Find the point (Vector3) local
-                            for (int lookback = 1; lookback <= 40 && i - lookback >= 0; lookback++)
-                            {
-                                var prevCode = codes[i - lookback];
-                                if ((prevCode.opcode == OpCodes.Ldloc_S || prevCode.opcode == OpCodes.Ldloc || prevCode.opcode == OpCodes.Ldloca_S) &&
-                                    prevCode.operand is LocalBuilder lb &&
-                                    lb.LocalType == typeof(Vector3))
-                                {
-                                    pointLocal = lb;
-                                    break;
+                                    if (lb.LocalType == typeof(float) && altLocal == null) altLocal = lb;
+                                    if (lb.LocalType == typeof(Vector3) && pointLocal == null) pointLocal = lb;
+                                    if (altLocal != null && pointLocal != null) break;
                                 }
                             }
 
@@ -359,34 +282,25 @@ namespace LocationBudgetBooster
                                 yield return new CodeInstruction(OpCodes.Ldarg_0);
                                 yield return new CodeInstruction(OpCodes.Ldfld, BoosterReflection.LocationFields[currentType]);
                                 yield return new CodeInstruction(OpCodes.Ldfld, AccessTools.Field(typeof(ZoneLocation), "m_maxAltitude"));
-                                yield return new CodeInstruction(OpCodes.Ldloc_S, pointLocal); // Pass the point!
+                                yield return new CodeInstruction(OpCodes.Ldloc_S, pointLocal);
                                 yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.TrackAltitudeFailure)));
-                                if (verbose) BoosterDiagnostics.WriteLog($"   [Track] Injected altitude tracking at IL_{i:D4}");
                             }
                         }
 
-                        // Distance tracking
                         if (errField.Name.Contains("errorCenterDistance"))
                         {
-                            if (verbose) BoosterDiagnostics.WriteLog($"   [Track] Found errorCenterDistance increment at IL_{i:D4}, searching for distance local...");
                             LocalBuilder distLocal = null;
-                            for (int lookback = 1; lookback <= 30 && i - lookback >= 0; lookback++)
+                            for (int x = 1; x <= 30 && i - x >= 0; x++)
                             {
-                                if (codes[i - lookback].opcode == OpCodes.Stloc_S &&
-                                    codes[i - lookback].operand is LocalBuilder lb &&
-                                    lb.LocalType == typeof(float))
+                                if (codes[i - x].opcode == OpCodes.Stloc_S && codes[i - x].operand is LocalBuilder lb && lb.LocalType == typeof(float))
                                 {
-                                    if (i - lookback - 1 >= 0 &&
-                                        codes[i - lookback - 1].opcode == OpCodes.Call &&
-                                        codes[i - lookback - 1].operand is MethodInfo magnitudeMi &&
-                                        magnitudeMi.Name == "get_magnitude")
+                                    if (i - x - 1 >= 0 && codes[i - x - 1].opcode == OpCodes.Call && codes[i - x - 1].operand is MethodInfo miMag && miMag.Name == "get_magnitude")
                                     {
                                         distLocal = lb;
                                         break;
                                     }
                                 }
                             }
-
                             if (distLocal != null && BoosterReflection.LocationFields.ContainsKey(currentType))
                             {
                                 yield return new CodeInstruction(OpCodes.Ldarg_0);
@@ -398,66 +312,10 @@ namespace LocationBudgetBooster
                                 yield return new CodeInstruction(OpCodes.Ldfld, BoosterReflection.LocationFields[currentType]);
                                 yield return new CodeInstruction(OpCodes.Ldfld, AccessTools.Field(typeof(ZoneLocation), "m_maxDistance"));
                                 yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.TrackDistanceFailure)));
-                                if (verbose) BoosterDiagnostics.WriteLog($"   [Track] Injected distance tracking at IL_{i:D4}");
                             }
                         }
                     }
                 }
-
-                // 10. Hook Failure
-                if (opcode == OpCodes.Ldstr && operand is string str)
-                {
-                    lastLogString = str.Trim();
-                    if (str.Contains("Failed to place all"))
-                    {
-                        if (verbose) BoosterDiagnostics.WriteLog($"   [Hook] Injecting ReportFailure at IL_{i:D4}");
-                        yield return new CodeInstruction(OpCodes.Ldarg_0);
-                        yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.ReportFailure)));
-                    }
-                }
-
-                // 11. Inject Shadow Counter Increment
-                if (opcode == OpCodes.Stfld && operand is FieldInfo stField)
-                {
-                    if (stField.Name.StartsWith("<error") && stField.Name.Contains(">"))
-                    {
-                        bool isIncrement = i > 0 && codes[i - 1].opcode == OpCodes.Add;
-
-                        if (isIncrement)
-                        {
-                            string fieldName = stField.Name;
-                            int start = fieldName.IndexOf('<') + 1;
-                            int end = fieldName.IndexOf('>');
-                            if (start > 0 && end > start)
-                            {
-                                string errorName = fieldName.Substring(start, end - start);
-
-                                yield return codes[i];
-
-                                yield return new CodeInstruction(OpCodes.Ldarg_0);
-                                yield return new CodeInstruction(OpCodes.Ldstr, errorName);
-                                yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.IncrementShadow)));
-
-                                if (verbose) BoosterDiagnostics.WriteLog($"   [Shadow] Injected overflow tracking for '{errorName}' at IL_{i:D4}");
-                                continue;
-                            }
-                        }
-                    }
-                }
-
-                // 12. Map Error Fields (must happen after use to capture lastLogString context)
-                if (opcode == OpCodes.Ldflda && !string.IsNullOrEmpty(lastLogString) && lastLogString.StartsWith("error"))
-                {
-                    var field = operand as FieldInfo;
-                    if (field != null && !BoosterReflection.ErrorFields.ContainsKey(lastLogString))
-                    {
-                        BoosterReflection.ErrorFields[lastLogString] = field;
-                        if (verbose) BoosterDiagnostics.WriteLog($"   [Reflect] Mapped error field '{lastLogString}' → {field.Name}");
-                    }
-                    lastLogString = "";
-                }
-
-                yield return codes[i];
             next_instr:;
             }
         }
