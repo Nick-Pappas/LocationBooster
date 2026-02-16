@@ -3,6 +3,7 @@ using BepInEx.Logging;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UnityEngine;
 using static ZoneSystem;
 
@@ -16,11 +17,13 @@ namespace LocationBudgetBooster
         public static Dictionary<int, Dictionary<Heightmap.Biome, long>> BiomeFailures = new Dictionary<int, Dictionary<Heightmap.Biome, long>>();
         public static Dictionary<int, Dictionary<Heightmap.BiomeArea, long>> BiomeAreaFailures = new Dictionary<int, Dictionary<Heightmap.BiomeArea, long>>();
 
-        // Simple counters -> Now Nested for Context
+        // Simple counters -> Split for specific failure types
         public static Dictionary<int, Dictionary<Heightmap.Biome, long>> AltitudeTooHigh = new Dictionary<int, Dictionary<Heightmap.Biome, long>>();
-        public static Dictionary<int, Dictionary<Heightmap.Biome, long>> AltitudeTooLow = new Dictionary<int, Dictionary<Heightmap.Biome, long>>();
+        public static Dictionary<int, Dictionary<Heightmap.Biome, long>> AltitudeTooLow_Standard = new Dictionary<int, Dictionary<Heightmap.Biome, long>>();
+        public static Dictionary<int, Dictionary<Heightmap.Biome, long>> AltitudeTooLow_Anomalous = new Dictionary<int, Dictionary<Heightmap.Biome, long>>();
+        public static Dictionary<int, Dictionary<Heightmap.Biome, long>> AltitudeTooLow_Underwater = new Dictionary<int, Dictionary<Heightmap.Biome, long>>();
 
-        // Detailed Stats Trackers -> Now Nested for Context
+        // Detailed Stats Trackers
         public class AltitudeStat
         {
             public float Min = float.MaxValue;
@@ -39,14 +42,17 @@ namespace LocationBudgetBooster
             public string GetString()
             {
                 if (Count == 0) return "";
-                return $"[Observed: Min {Min:F1}m, Max {Max:F1}m, Avg {(Sum / Count):F1}m]";
+                // Formatting: [Observed: Min, Avg, Max]
+                return $"[Observed: Min {Min:F1}m, Avg {(Sum / Count):F1}m, Max {Max:F1}m]";
             }
         }
 
-        public static Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>> AltLowStats = new Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>>();
         public static Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>> AltHighStats = new Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>>();
+        public static Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>> AltLowStats_Standard = new Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>>();
+        public static Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>> AltLowStats_Anomalous = new Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>>();
+        public static Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>> AltLowStats_Underwater = new Dictionary<int, Dictionary<Heightmap.Biome, AltitudeStat>>();
 
-        // Distance remains simple for now
+        // Distance remains simple
         public static Dictionary<int, long> DistanceTooClose = new Dictionary<int, long>();
         public static Dictionary<int, long> DistanceTooFar = new Dictionary<int, long>();
 
@@ -55,6 +61,9 @@ namespace LocationBudgetBooster
         // Global stats
         public static int FilterTotalCalls = 0;
         public static int FilterAcceptedZones = 0;
+        public static float GlobalMinAltitudeSeen = float.MaxValue;
+        public static float GlobalMaxAltitudeSeen = float.MinValue;
+
 
         public static void Initialize(string version)
         {
@@ -79,6 +88,12 @@ namespace LocationBudgetBooster
         }
 
         // --- Data Capture Methods ---
+
+        public static void TrackGlobalAltitude(float altitude)
+        {
+            if (altitude < GlobalMinAltitudeSeen) GlobalMinAltitudeSeen = altitude;
+            if (altitude > GlobalMaxAltitudeSeen) GlobalMaxAltitudeSeen = altitude;
+        }
 
         public static void IncrementShadow(object instance, string fieldName)
         {
@@ -112,10 +127,25 @@ namespace LocationBudgetBooster
             BiomeAreaFailures[hash][__result]++;
         }
 
+        public static float GetAnomalyFloor(Heightmap.Biome biome)
+        {
+            switch (biome)
+            {
+                case Heightmap.Biome.Mountain:
+                    return 50f;
+                case Heightmap.Biome.Plains:
+                case Heightmap.Biome.BlackForest:
+                case Heightmap.Biome.Meadows:
+                case Heightmap.Biome.Swamp:
+                    return 1f;
+                default:
+                    return -10000f;
+            }
+        }
+
         public static void TrackAltitudeFailure(object instance, float height, float minAlt, float maxAlt, Vector3 point)
         {
             int hash = instance.GetHashCode();
-            // Resolve the biome here in C# since passing it from IL is messy
             Heightmap.Biome biome = WorldGenerator.instance.GetBiome(point);
 
             if (height > maxAlt)
@@ -130,13 +160,43 @@ namespace LocationBudgetBooster
             }
             else if (height < minAlt)
             {
-                if (!AltitudeTooLow.ContainsKey(hash)) AltitudeTooLow[hash] = new Dictionary<Heightmap.Biome, long>();
-                if (!AltitudeTooLow[hash].ContainsKey(biome)) AltitudeTooLow[hash][biome] = 0;
-                AltitudeTooLow[hash][biome]++;
+                if (height < 0f)
+                {
+                    // Category 1: Underwater (<0m)
+                    if (!AltitudeTooLow_Underwater.ContainsKey(hash)) AltitudeTooLow_Underwater[hash] = new Dictionary<Heightmap.Biome, long>();
+                    if (!AltitudeTooLow_Underwater[hash].ContainsKey(biome)) AltitudeTooLow_Underwater[hash][biome] = 0;
+                    AltitudeTooLow_Underwater[hash][biome]++;
 
-                if (!AltLowStats.ContainsKey(hash)) AltLowStats[hash] = new Dictionary<Heightmap.Biome, AltitudeStat>();
-                if (!AltLowStats[hash].ContainsKey(biome)) AltLowStats[hash][biome] = new AltitudeStat();
-                AltLowStats[hash][biome].Add(height);
+                    if (!AltLowStats_Underwater.ContainsKey(hash)) AltLowStats_Underwater[hash] = new Dictionary<Heightmap.Biome, AltitudeStat>();
+                    if (!AltLowStats_Underwater[hash].ContainsKey(biome)) AltLowStats_Underwater[hash][biome] = new AltitudeStat();
+                    AltLowStats_Underwater[hash][biome].Add(height);
+                }
+                else
+                {
+                    float anomalyFloor = GetAnomalyFloor(biome);
+                    if (height < anomalyFloor)
+                    {
+                        // Category 2: Anomalous (0m to BiomeFloor)
+                        if (!AltitudeTooLow_Anomalous.ContainsKey(hash)) AltitudeTooLow_Anomalous[hash] = new Dictionary<Heightmap.Biome, long>();
+                        if (!AltitudeTooLow_Anomalous[hash].ContainsKey(biome)) AltitudeTooLow_Anomalous[hash][biome] = 0;
+                        AltitudeTooLow_Anomalous[hash][biome]++;
+
+                        if (!AltLowStats_Anomalous.ContainsKey(hash)) AltLowStats_Anomalous[hash] = new Dictionary<Heightmap.Biome, AltitudeStat>();
+                        if (!AltLowStats_Anomalous[hash].ContainsKey(biome)) AltLowStats_Anomalous[hash][biome] = new AltitudeStat();
+                        AltLowStats_Anomalous[hash][biome].Add(height);
+                    }
+                    else
+                    {
+                        // Category 3: Standard Failure (BiomeFloor to minAltitude)
+                        if (!AltitudeTooLow_Standard.ContainsKey(hash)) AltitudeTooLow_Standard[hash] = new Dictionary<Heightmap.Biome, long>();
+                        if (!AltitudeTooLow_Standard[hash].ContainsKey(biome)) AltitudeTooLow_Standard[hash][biome] = 0;
+                        AltitudeTooLow_Standard[hash][biome]++;
+
+                        if (!AltLowStats_Standard.ContainsKey(hash)) AltLowStats_Standard[hash] = new Dictionary<Heightmap.Biome, AltitudeStat>();
+                        if (!AltLowStats_Standard[hash].ContainsKey(biome)) AltLowStats_Standard[hash][biome] = new AltitudeStat();
+                        AltLowStats_Standard[hash][biome].Add(height);
+                    }
+                }
             }
         }
 
@@ -198,7 +258,6 @@ namespace LocationBudgetBooster
 
             if (placed + 1 < loc.m_quantity) return;
 
-            // Report logic expects placed count to include the one just finished
             var data = BoosterAnalyzer.Analyze(instance, placed + 1);
             BoosterReporter.WriteReport(data, false);
             Cleanup(data?.InstanceHash ?? 0, data?.LocHash ?? 0);
@@ -210,11 +269,15 @@ namespace LocationBudgetBooster
             {
                 ShadowCounters.Remove(instanceHash);
                 AltitudeTooHigh.Remove(instanceHash);
-                AltitudeTooLow.Remove(instanceHash);
+                AltitudeTooLow_Standard.Remove(instanceHash);
+                AltitudeTooLow_Anomalous.Remove(instanceHash);
+                AltitudeTooLow_Underwater.Remove(instanceHash);
                 DistanceTooClose.Remove(instanceHash);
                 DistanceTooFar.Remove(instanceHash);
-                AltLowStats.Remove(instanceHash);
                 AltHighStats.Remove(instanceHash);
+                AltLowStats_Standard.Remove(instanceHash);
+                AltLowStats_Anomalous.Remove(instanceHash);
+                AltLowStats_Underwater.Remove(instanceHash);
             }
 
             if (locHash != 0)

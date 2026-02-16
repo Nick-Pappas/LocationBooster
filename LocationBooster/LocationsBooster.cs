@@ -12,8 +12,10 @@ namespace LocationBudgetBooster
     {
         Vanilla,    // Standard game behavior (Off)
         Filter,     // Generate standard square, but reject if outside distance ring (Sieve)
-        Force       // Generate directly inside distance ring (Donut Math)
+        Force,      // Generate directly inside distance ring (Donut Math)
+        Survey      // My best idea for BC
     }
+
 
     [BepInPlugin("nickpappas.locationbooster", "Location Budget Booster", "0.3.2")]
     public class LocationBooster : BaseUnityPlugin

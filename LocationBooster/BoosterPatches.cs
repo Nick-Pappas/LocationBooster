@@ -238,6 +238,34 @@ namespace LocationBudgetBooster
                     }
                 }
 
+                // 5b. Inject Global Altitude Profiling
+                // Look for the constant 30 followed by a subtraction and a float store
+                if (opcode == OpCodes.Ldc_R8 && operand is double dval && dval == 30.0)
+                {
+                    for (int j = i + 1; j < i + 10 && j < codes.Count; j++)
+                    {
+                        if ((codes[j].opcode == OpCodes.Stloc || codes[j].opcode == OpCodes.Stloc_S) && codes[j].operand is LocalBuilder lb && lb.LocalType == typeof(float))
+                        {
+                            // We found the altitude local! Let's inject after the store.
+                            // We yield everything up to and including the stloc first.
+                            while (i <= j)
+                            {
+                                yield return codes[i];
+                                i++;
+                            }
+
+                            // Now inject the global tracker call
+                            yield return new CodeInstruction(OpCodes.Ldloc_S, lb);
+                            yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.TrackGlobalAltitude)));
+
+                            if (verbose) BoosterDiagnostics.WriteLog($"   [Global] Injected global altitude tracking after IL_{j:D4}");
+                            // Decrement i because the outer loop will increment it again
+                            i--;
+                            goto next_instr;
+                        }
+                    }
+                }
+
                 // 6. Progress Heartbeat Injection
                 if (LocationBooster.ProgressInterval.Value > 0 && BoosterReflection.CounterFields.ContainsKey(currentType) &&
                     opcode == OpCodes.Stfld && operand is FieldInfo fi3 && fi3 == BoosterReflection.CounterFields[currentType])
@@ -295,7 +323,7 @@ namespace LocationBudgetBooster
                             LocalBuilder altLocal = null;
                             LocalBuilder pointLocal = null;
 
-                            // 1. Find the altitude (float) local - usually close
+                            // Find the altitude (float) local
                             for (int lookback = 1; lookback <= 15 && i - lookback >= 0; lookback++)
                             {
                                 var prevCode = codes[i - lookback];
@@ -308,8 +336,7 @@ namespace LocationBudgetBooster
                                 }
                             }
 
-                            // 2. Find the point (Vector3) local - further back
-                            // We look for any Ldloc of type Vector3 in the preceding 40 instructions
+                            // Find the point (Vector3) local
                             for (int lookback = 1; lookback <= 40 && i - lookback >= 0; lookback++)
                             {
                                 var prevCode = codes[i - lookback];
@@ -318,7 +345,7 @@ namespace LocationBudgetBooster
                                     lb.LocalType == typeof(Vector3))
                                 {
                                     pointLocal = lb;
-                                    break; // Assume the most recent Vector3 usage is the point
+                                    break;
                                 }
                             }
 
@@ -335,10 +362,6 @@ namespace LocationBudgetBooster
                                 yield return new CodeInstruction(OpCodes.Ldloc_S, pointLocal); // Pass the point!
                                 yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.TrackAltitudeFailure)));
                                 if (verbose) BoosterDiagnostics.WriteLog($"   [Track] Injected altitude tracking at IL_{i:D4}");
-                            }
-                            else if (verbose)
-                            {
-                                BoosterDiagnostics.WriteLog($"   [Track] Failed to find locals for Altitude check. Alt: {altLocal != null}, Point: {pointLocal != null}");
                             }
                         }
 
@@ -435,6 +458,7 @@ namespace LocationBudgetBooster
                 }
 
                 yield return codes[i];
+            next_instr:;
             }
         }
     }
