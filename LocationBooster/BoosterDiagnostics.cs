@@ -5,11 +5,18 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using UnityEngine;
 using static ZoneSystem;
 
 namespace LocationBudgetBooster
 {
+    public enum HeartbeatType
+    {
+        Outer,
+        Inner
+    }
+
     public static class BoosterDiagnostics
     {
         private static StreamWriter _logWriter;
@@ -92,7 +99,43 @@ namespace LocationBudgetBooster
             _lastInnerLogValue = _totalInnerIterations;
 
             var data = BoosterAnalyzer.Analyze(instance);
-            BoosterReporter.WriteReport(data, true);
+            BoosterReporter.WriteReport(data, true, HeartbeatType.Inner);
+        }
+
+        public static void LogLocationStart(ZoneSystem.ZoneLocation location, BoosterMode mode)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine($"[START] Placing [{location.m_prefabName}]: {location.m_quantity} locations");
+
+            // Build requirements line
+            var reqs = new List<string>();
+            if (location.m_biome != 0) reqs.Add($"{location.m_biome}");
+            float maxDist = location.m_maxDistance > 0.1f ? location.m_maxDistance : LocationBooster.WorldRadius.Value;
+            if (location.m_minDistance > 0 || maxDist < LocationBooster.WorldRadius.Value)
+                reqs.Add($"Distance: {location.m_minDistance:F0}-{maxDist:F0}m");
+            if (location.m_minAltitude > -1000 || location.m_maxAltitude < 10000)
+                reqs.Add($"Altitude: {location.m_minAltitude:F0}-{location.m_maxAltitude:F0}m");
+            if (location.m_minTerrainDelta > 0 || location.m_maxTerrainDelta < 100)
+                reqs.Add($"Terrain: {location.m_minTerrainDelta:F1}-{location.m_maxTerrainDelta:F1}");
+            if (location.m_inForest)
+                reqs.Add($"Forest: {location.m_forestTresholdMin:F2}-{location.m_forestTresholdMax:F2}");
+            if (reqs.Count > 0)
+                sb.AppendLine($"       Requires: {string.Join(" | ", reqs)}");
+
+            // Survey mode specific: show candidate count
+            if (mode == BoosterMode.Survey)
+            {
+                int candidateCount = BoosterSurvey.GetCandidateCount(location);
+                sb.AppendLine($"       Valid Zones: {candidateCount:N0}");
+            }
+
+            // World altitude profile
+            if (GlobalMaxAltitudeSeen > float.MinValue)
+                sb.AppendLine($"       World Altitude: Min {GlobalMinAltitudeSeen:F1}m, Max {GlobalMaxAltitudeSeen:F1}m");
+
+            sb.AppendLine("*****************************************");
+
+            WriteTimestampedLog(sb.ToString().TrimEnd());
         }
 
         public static void TrackGlobalAltitude(float altitude)
@@ -199,7 +242,7 @@ namespace LocationBudgetBooster
             long current = Convert.ToInt64(field.GetValue(instance));
             if (current < interval || current % interval != 0) return;
             var data = BoosterAnalyzer.Analyze(instance);
-            BoosterReporter.WriteReport(data, true);
+            BoosterReporter.WriteReport(data, true, HeartbeatType.Outer);
         }
 
         public static void ReportFailure(object instance)

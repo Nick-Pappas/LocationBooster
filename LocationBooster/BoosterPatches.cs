@@ -64,24 +64,28 @@ namespace LocationBudgetBooster
 
         public static bool GetRandomZonePrefix(ref Vector2i __result, float range)
         {
+            
             BoosterDiagnostics.FilterTotalCalls++;
             if (_insideGetRandomZone) return true;
 
             var mode = LocationBooster.Mode.Value;
-            if (mode == BoosterMode.Vanilla) return true;
-
             var currentLoc = BoosterReflection.CurrentLocationForFilter;
+        
             if (currentLoc == null) return true;
+            if (currentLoc.m_centerFirst) return true; // vanilla handles this correctly I guess. Just bail for this one so that we do not insert it at ANY meadows on the map...
+            // Log START for all modes
+            if (currentLoc.m_prefabName != _lastLoggedLocation)
+            {
+                BoosterDiagnostics.LogLocationStart(currentLoc, mode);
+                _lastLoggedLocation = currentLoc.m_prefabName;
+            }
+
+            // Early return for Vanilla
+            if (mode == BoosterMode.Vanilla) return true;
 
             string target = LocationBooster.FilterTarget.Value;
             bool isGlobalMode = string.IsNullOrWhiteSpace(target);
             if (!isGlobalMode && currentLoc.m_prefabName != target) return true;
-
-            if (LocationBooster.DiagnosticMode.Value && currentLoc.m_prefabName != _lastLoggedLocation)
-            {
-                BoosterDiagnostics.WriteTimestampedLog($"Applying '{mode}' mode to {currentLoc.m_prefabName}");
-                _lastLoggedLocation = currentLoc.m_prefabName;
-            }
 
             try
             {
@@ -205,7 +209,7 @@ namespace LocationBudgetBooster
                     yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterReflection), nameof(BoosterReflection.SetCurrentLocation)));
                 }
 
-                if (opcode == OpCodes.Ldc_R4 && operand is float fval && fval == 30f)
+                if (opcode == OpCodes.Ldc_R8 && operand is double dval && dval == 30.0)
                 {
                     for (int j = i + 1; j < i + 10 && j < codes.Count; j++)
                     {

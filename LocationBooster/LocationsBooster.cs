@@ -114,7 +114,8 @@ namespace LocationBudgetBooster
                 }
             }
 
-            BoosterDiagnostics.WriteLog($"[Booster] Mode: {Mode.Value}. Target: {FilterTarget.Value}.");
+            string target = string.IsNullOrWhiteSpace(FilterTarget.Value) ? "all locations" : FilterTarget.Value;
+            BoosterDiagnostics.WriteLog($"[Booster] Initialized. Mode: {Mode.Value} (applies to: {target})");
         }
 
         void OnDestroy()

@@ -12,32 +12,40 @@ namespace LocationBudgetBooster
     {
         private class FunnelStep { public string Name; public string ConfigInfo; public string PassedContext; public long Input; public long Failures; public Action<StringBuilder, string> FailurePrinter; public long Passed => Input - Failures; }
 
-        public static void WriteReport(ReportData data, bool isHeartbeat)
+        public static void WriteReport(ReportData data, bool isHeartbeat, HeartbeatType heartbeatType = HeartbeatType.Inner)
         {
             if (data == null) return;
-            if (isHeartbeat) LogHeartbeat(data); else LogFullReport(data);
+            if (isHeartbeat) LogHeartbeat(data, heartbeatType); else LogFullReport(data);
         }
 
-        private static void LogHeartbeat(ReportData data)
+        private static void LogHeartbeat(ReportData data, HeartbeatType type)
         {
             StringBuilder sb = new StringBuilder();
             sb.AppendLine();
-            sb.AppendLine($"[PROGRESS] {data.Loc.m_prefabName}: {data.Placed}/{data.Loc.m_quantity}. Cost: {data.CurrentOuter:N0}/{data.LimitOuter:N0}");
-            if (BoosterDiagnostics.GlobalMaxAltitudeSeen > float.MinValue) sb.AppendLine($"(World Altitude Profile: Min {BoosterDiagnostics.GlobalMinAltitudeSeen:F1}m, Max {BoosterDiagnostics.GlobalMaxAltitudeSeen:F1}m)");
 
-            if (data.ErrZone > 0 || data.ErrArea > 0) { sb.AppendLine(" PHASE 1 FAILURES (Zone Search):"); if (data.ErrZone > 0) sb.AppendLine($"       - Zone Occupied            : {data.ErrZone,12:N0}"); if (data.ErrArea > 0) { sb.AppendLine($"       - Wrong Biome Area         : {data.ErrArea,12:N0}"); BoosterReporter.PrintDict(sb, "          └─ ", BoosterDiagnostics.BiomeAreaFailures, data.LocHash); } }
+            string prefix = type == HeartbeatType.Outer ? "[PROGRESS-OUTER]" : "[PROGRESS-INNER]";
+            sb.AppendLine($"{prefix} {data.Loc.m_prefabName}: {data.Placed}/{data.Loc.m_quantity}. Cost: {data.CurrentOuter:N0}/{data.LimitOuter:N0}");
 
-            sb.AppendLine(" PHASE 2 FAILURES (Placement Filters):");
+            if (BoosterDiagnostics.GlobalMaxAltitudeSeen > float.MinValue)
+                sb.AppendLine($"           (World Altitude Profile: Min {BoosterDiagnostics.GlobalMinAltitudeSeen:F1}m, Max {BoosterDiagnostics.GlobalMaxAltitudeSeen:F1}m)");
+
+            if (data.ErrZone > 0 || data.ErrArea > 0) { sb.AppendLine("           PHASE 1 FAILURES (Zone Search):"); if (data.ErrZone > 0) sb.AppendLine($"                  - Zone Occupied            : {data.ErrZone,12:N0}"); if (data.ErrArea > 0) { sb.AppendLine($"                  - Wrong Biome Area         : {data.ErrArea,12:N0}"); BoosterReporter.PrintDict(sb, "                     └─ ", BoosterDiagnostics.BiomeAreaFailures, data.LocHash); } }
+
+            sb.AppendLine("           PHASE 2 FAILURES (Placement Filters):");
             var failures = new List<(string Name, long Count, Action<StringBuilder, string> DetailsPrinter)>();
             if (data.ErrDist > 0) failures.Add(("Distance Filter", data.ErrDist, (s, pad) => BoosterReporter.PrintDist(s, pad, data.InstanceHash)));
             if (data.ErrBiome > 0) failures.Add(("Wrong Biome Type", data.ErrBiome, (s, pad) => BoosterReporter.PrintDict(s, pad, BoosterDiagnostics.BiomeFailures, data.LocHash)));
-            if (data.ErrAlt > 0) failures.Add(("Wrong Altitude", data.ErrAlt, (s, pad) => BoosterReporter.PrintAlt(s, "          ", data.InstanceHash)));
+            if (data.ErrAlt > 0) failures.Add(("Wrong Altitude", data.ErrAlt, (s, pad) => BoosterReporter.PrintAlt(s, "                     ", data.InstanceHash)));
             if (data.ErrForest > 0) failures.Add(("Forest Check", data.ErrForest, null));
             if (data.ErrTerrain > 0) failures.Add(("Terrain Check", data.ErrTerrain, null));
             if (data.ErrSim + data.ErrNotSim > 0) failures.Add(("Similarity Check", data.ErrSim + data.ErrNotSim, null));
             if (data.ErrVeg > 0) failures.Add(("Vegetation Density", data.ErrVeg, null));
 
-            foreach (var fail in failures.OrderByDescending(x => x.Count).Take(5)) { sb.AppendLine($"       - {fail.Name.PadRight(25)}: {fail.Count,12:N0}"); fail.DetailsPrinter?.Invoke(sb, "          └─ "); }
+            foreach (var fail in failures.OrderByDescending(x => x.Count).Take(5)) { sb.AppendLine($"                  - {fail.Name.PadRight(25)}: {fail.Count,12:N0}"); fail.DetailsPrinter?.Invoke(sb, "                     └─ "); }
+
+            if (type == HeartbeatType.Outer)
+                sb.AppendLine("─────────────────────────────────────────────────────────");
+
             BoosterDiagnostics.WriteTimestampedLog(sb.ToString().TrimEnd());
         }
 
@@ -73,7 +81,47 @@ namespace LocationBudgetBooster
             steps.Add(new FunnelStep { Name = "VEGETATION DENSITY", ConfigInfo = $"(Min: {data.Loc.m_minimumVegetation:F2}, Max: {data.Loc.m_maximumVegetation:F2})", PassedContext = "Density Match", Input = data.InVeg, Failures = data.ErrVeg });
 
             string indent = "";
-            for (int i = 0; i < steps.Count; i++) { var step = steps[i]; if (i > 0 && steps[i - 1].Passed == 0) break; bool allFuturePerfect = steps.Skip(i).All(s => s.Failures == 0); if (allFuturePerfect) { string joinedNames = string.Join(" -> ", steps.Skip(i).Select(s => s.Name.Replace(" CHECK", "").Replace(" FILTER", "").Replace(" MATCH", ""))); report.AppendLine($"{indent}└─ PASSED REMAINING CHECKS ({joinedNames}): {step.Passed:N0}"); break; } if (i == 0) report.AppendLine($"1. {step.Name} {step.ConfigInfo}"); else report.AppendLine($"{indent}└─ {i + 1}. {step.Name} {step.ConfigInfo}: {step.Input:N0} points checked"); string statusIndent = (i == 0) ? "" : indent + "   "; if (step.Failures > 0) { report.AppendLine($"{statusIndent}[x] Failed: {step.Failures:N0}"); step.FailurePrinter?.Invoke(report, statusIndent); } if (step.Passed > 0) { report.AppendLine($"{statusIndent}[!] Passed: {step.Passed:N0}"); report.AppendLine($"{statusIndent}    └─ {step.PassedContext}"); indent += "       "; report.AppendLine($"{indent}|"); } }
+            for (int i = 0; i < steps.Count; i++)
+            {
+                var step = steps[i];
+                if (i > 0 && steps[i - 1].Passed == 0) break;
+
+                bool allFuturePerfect = steps.Skip(i).All(s => s.Failures == 0);
+                if (allFuturePerfect)
+                {
+                    string joinedNames = string.Join(" -> ", steps.Skip(i).Select(s => s.Name.Replace(" CHECK", "").Replace(" FILTER", "").Replace(" MATCH", "")));
+                    report.AppendLine($"{indent}└─ PASSED REMAINING CHECKS ({joinedNames}): {step.Passed:N0}");
+                    break;
+                }
+
+                if (i == 0)
+                    report.AppendLine($"1. {step.Name} {step.ConfigInfo}");
+                else
+                    report.AppendLine($"{indent}└─ {i + 1}. {step.Name} {step.ConfigInfo}: {step.Input:N0} points checked");
+
+                string statusIndent = (i == 0) ? "" : indent + "   ";
+
+                if (step.Failures > 0)
+                {
+                    report.AppendLine($"{statusIndent}[x] Failed: {step.Failures:N0}");
+                    step.FailurePrinter?.Invoke(report, statusIndent);
+                }
+
+                if (step.Passed > 0)
+                {
+                    report.AppendLine($"{statusIndent}[!] Passed: {step.Passed:N0}");
+                    report.AppendLine($"{statusIndent}    └─ {step.PassedContext}");
+                    indent += "       ";
+
+                    // Only add pipe if there's more content coming (not at end and next won't be "PASSED REMAINING")
+                    bool isLastStep = (i == steps.Count - 1);
+                    bool nextWillBePerfect = !isLastStep && steps.Skip(i + 1).All(s => s.Failures == 0);
+                    if (!isLastStep && !nextWillBePerfect)
+                    {
+                        report.AppendLine($"{indent}|");
+                    }
+                }
+            }
             report.AppendLine("────────────────────────────────────────────────────────");
             BoosterDiagnostics.WriteTimestampedLog(report.ToString(), level);
         }

@@ -18,6 +18,48 @@ namespace LocationBudgetBooster
 
         public static bool SurveyExhausted = false;
 
+        public static int GetCandidateCount(ZoneLocation location)
+        {
+            Initialize();
+            int locHash = location.GetHashCode();
+
+            if (_candidateCache.TryGetValue(locHash, out var cached))
+                return cached.Count;
+
+            var candidates = BuildCandidateList(location);
+            _candidateCache[locHash] = candidates;
+            return candidates.Count;
+        }
+
+        private static List<Vector2i> BuildCandidateList(ZoneLocation location)
+        {
+            var allCandidates = new List<Vector2i>();
+            var requiredBiomes = new List<Heightmap.Biome>();
+
+            foreach (var biomeKvp in _biomeIndex)
+            {
+                if ((location.m_biome & biomeKvp.Key) != Heightmap.Biome.None)
+                    requiredBiomes.Add(biomeKvp.Key);
+            }
+
+            float minD = location.m_minDistance;
+            float maxD = location.m_maxDistance > 0.1f ? location.m_maxDistance : LocationBooster.WorldRadius.Value;
+
+            foreach (var biome in requiredBiomes)
+            {
+                if (!_biomeIndex.ContainsKey(biome)) continue;
+                foreach (var zone in _biomeIndex[biome])
+                {
+                    Vector3 center = ZoneSystem.GetZonePos(zone);
+                    if (center.magnitude < minD || center.magnitude > maxD) continue;
+                    if ((location.m_biomeArea & WorldGenerator.instance.GetBiomeArea(center)) == 0) continue;
+                    allCandidates.Add(zone);
+                }
+            }
+
+            return allCandidates;
+        }
+
         public static bool GetZone(ZoneLocation location, out Vector2i result)
         {
             Initialize();
@@ -25,30 +67,9 @@ namespace LocationBudgetBooster
 
             if (!_candidateCache.TryGetValue(locHash, out var allCandidates))
             {
-                allCandidates = new List<Vector2i>();
-                var requiredBiomes = new List<Heightmap.Biome>();
-                foreach (var biomeKvp in _biomeIndex)
-                {
-                    if ((location.m_biome & biomeKvp.Key) != Heightmap.Biome.None)
-                        requiredBiomes.Add(biomeKvp.Key);
-                }
-
-                float minD = location.m_minDistance;
-                float maxD = location.m_maxDistance > 0.1f ? location.m_maxDistance : LocationBooster.WorldRadius.Value;
-
-                foreach (var biome in requiredBiomes)
-                {
-                    if (!_biomeIndex.ContainsKey(biome)) continue;
-                    foreach (var zone in _biomeIndex[biome])
-                    {
-                        Vector3 center = ZoneSystem.GetZonePos(zone);
-                        if (center.magnitude < minD || center.magnitude > maxD) continue;
-                        if ((location.m_biomeArea & WorldGenerator.instance.GetBiomeArea(center)) == 0) continue;
-                        allCandidates.Add(zone);
-                    }
-                }
+                allCandidates = BuildCandidateList(location);
                 _candidateCache[locHash] = allCandidates;
-                BoosterDiagnostics.WriteLog($"Analyzed world: {allCandidates.Count:N0} valid potential zones for {location.m_prefabName}.");
+                BoosterDiagnostics.WriteLog($"[BoosterSurvey] Analyzed world: {allCandidates.Count:N0} valid potential zones for {location.m_prefabName}.");
             }
 
             if (allCandidates.Count == 0)
