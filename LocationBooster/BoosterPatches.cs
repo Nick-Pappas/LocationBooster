@@ -13,10 +13,10 @@ namespace LocationBudgetBooster
     public static class BoosterPatches
     {
         public static HashSet<string> PatchedTypes = new HashSet<string>();
-        private static HashSet<string> _transpiledMethods = new HashSet<string>();
         private static bool _insideGetRandomZone = false;
         private static string _lastLoggedLocation = "";
 
+        // --- SCANNING HELPERS ---
         public static bool ScanForInnerLoop(MethodInfo method)
         {
             try { return PatchProcessor.GetOriginalInstructions(method).Any(x => x.opcode == OpCodes.Call && x.operand is MethodInfo mi && mi.Name == "GetRandomPointInZone"); }
@@ -29,107 +29,27 @@ namespace LocationBudgetBooster
             catch { return false; }
         }
 
+        // --- OUTER LOOP HOOKS ---
+        public static void OuterLoopPrefix()
+        {
+            if (ZoneSystem.instance != null)
+            {
+                BoosterGlobalProgress.StartGeneration(ZoneSystem.instance);
+            }
+        }
+
+        public static void OuterLoopPostfix(ref bool __result)
+        {
+            if (!__result)
+            {
+                BoosterGlobalProgress.EndGeneration();
+            }
+        }
+
         public static void ResetAndPrepareForNewLocation()
         {
-            BoosterSurvey.SurveyExhausted = false;
+            BoosterSurveyPlus.SurveyExhausted = false;
             BoosterDiagnostics.ResetInnerLoopCounter();
-        }
-
-        public static bool InnerLoopPrefix(object __instance, ref bool __result)
-        {
-            if (BoosterSurvey.SurveyExhausted)
-            {
-                if (BoosterReflection.IterationsPkgField != null)
-                {
-                    try
-                    {
-                        var pkg = BoosterReflection.IterationsPkgField.GetValue(__instance) as ZPackage;
-                        if (pkg != null)
-                        {
-                            pkg.Clear();
-                            pkg.Write(0);
-                            pkg.SetPos(0);
-                        }
-                    }
-                    catch { }
-                }
-
-                BoosterDiagnostics.ReportFailure(__instance);
-
-                __result = false;
-                return false;
-            }
-            return true;
-        }
-
-        public static bool GetRandomZonePrefix(ref Vector2i __result, float range)
-        {
-            
-            BoosterDiagnostics.FilterTotalCalls++;
-            if (_insideGetRandomZone) return true;
-
-            var mode = LocationBooster.Mode.Value;
-            var currentLoc = BoosterReflection.CurrentLocationForFilter;
-        
-            if (currentLoc == null) return true;
-            if (currentLoc.m_centerFirst) return true; // vanilla handles this correctly I guess. Just bail for this one so that we do not insert it at ANY meadows on the map...
-            // Log START for all modes
-            if (currentLoc.m_prefabName != _lastLoggedLocation)
-            {
-                if (LocationBooster.LogSuccesses.Value || LocationBooster.DiagnosticMode.Value)
-                {
-                    BoosterDiagnostics.LogLocationStart(currentLoc, mode);
-                }
-                _lastLoggedLocation = currentLoc.m_prefabName;
-            }
-
-            // Early return for Vanilla
-            if (mode == BoosterMode.Vanilla) return true;
-
-            string target = LocationBooster.FilterTarget.Value;
-            bool isGlobalMode = string.IsNullOrWhiteSpace(target);
-            if (!isGlobalMode && currentLoc.m_prefabName != target) return true;
-
-            try
-            {
-                _insideGetRandomZone = true;
-                float min = currentLoc.m_minDistance;
-                float max = currentLoc.m_maxDistance > 0.1f ? currentLoc.m_maxDistance : LocationBooster.WorldRadius.Value;
-
-                if (mode == BoosterMode.Force) { __result = BoosterForce.GenerateDonut(min, max); BoosterDiagnostics.FilterAcceptedZones++; return false; }
-                if (mode == BoosterMode.Filter) { __result = BoosterFilter.GenerateSieve(min, max, LocationBooster.WorldRadius.Value); BoosterDiagnostics.FilterAcceptedZones++; return false; }
-
-                if (mode == BoosterMode.Survey)
-                {
-                    if (BoosterSurvey.GetZone(currentLoc, out Vector2i surveyResult))
-                    {
-                        __result = surveyResult; BoosterDiagnostics.FilterAcceptedZones++; return false;
-                    }
-                    else
-                    {
-                        __result = BoosterReflection.CachedOccupiedZone ?? Vector2i.zero;
-                        return false;
-                    }
-                }
-                if (mode == BoosterMode.SurveyPlus)
-                {
-                    if (BoosterSurveyPlus.GetZone(currentLoc, out Vector2i surveyResult))
-                    {
-                        __result = surveyResult;
-                        BoosterDiagnostics.FilterAcceptedZones++;
-                        return false;
-                    }
-                    else
-                    {
-                        // Exhausted: Return the last known occupied zone (standard fail behavior)
-                        // or (0,0) to let the inner loop fail naturally.
-                        __result = BoosterReflection.CachedOccupiedZone ?? Vector2i.zero;
-                        return false;
-                    }
-                }
-                return true;
-            }
-            finally { _insideGetRandomZone = false; }
         }
 
         public static IEnumerable<CodeInstruction> OuterLoopTranspiler(IEnumerable<CodeInstruction> instructions)
@@ -144,32 +64,91 @@ namespace LocationBudgetBooster
                 }
             }
         }
-        public static void OuterLoopPrefix()
+
+        // --- INNER LOOP HOOKS ---
+        public static bool InnerLoopPrefix(object __instance, ref bool __result)
         {
-            if (ZoneSystem.instance != null)
+            // Fixes the 8-second delay by checking the correct SurveyPlus flag
+            if (BoosterSurveyPlus.SurveyExhausted)
             {
-                BoosterGlobalProgress.StartGeneration(ZoneSystem.instance);
+                if (BoosterReflection.IterationsPkgField != null)
+                {
+                    try
+                    {
+                        var pkg = BoosterReflection.IterationsPkgField.GetValue(__instance) as ZPackage;
+                        if (pkg != null) { pkg.Clear(); pkg.Write(0); pkg.SetPos(0); }
+                    }
+                    catch { }
+                }
+
+                BoosterDiagnostics.ReportFailure(__instance);
+
+                __result = false;
+                return false;
             }
+            return true;
         }
 
-        public static void OuterLoopPostfix(ref bool __result)
+        public static bool GetRandomZonePrefix(ref Vector2i __result, float range)
         {
-            // The coroutine's MoveNext returns false when the iteration is entirely finished
-            if (!__result)
+            BoosterDiagnostics.FilterTotalCalls++;
+            if (_insideGetRandomZone) return true;
+
+            var mode = LocationBooster.Mode.Value;
+            var currentLoc = BoosterReflection.CurrentLocationForFilter;
+
+            if (currentLoc == null) return true;
+            if (currentLoc.m_centerFirst) return true;
+
+            // Log START for all modes
+            if (currentLoc.m_prefabName != _lastLoggedLocation)
             {
-                BoosterGlobalProgress.EndGeneration();
+                if (LocationBooster.LogSuccesses.Value || LocationBooster.DiagnosticMode.Value)
+                {
+                    BoosterDiagnostics.LogLocationStart(currentLoc, mode);
+                }
+                _lastLoggedLocation = currentLoc.m_prefabName;
             }
+
+            if (mode == BoosterMode.Vanilla) return true;
+
+            try
+            {
+                _insideGetRandomZone = true;
+                float min = currentLoc.m_minDistance;
+                float max = currentLoc.m_maxDistance > 0.1f ? currentLoc.m_maxDistance : LocationBooster.WorldRadius.Value;
+
+                if (mode == BoosterMode.Force) { __result = BoosterForce.GenerateDonut(min, max); BoosterDiagnostics.FilterAcceptedZones++; return false; }
+                if (mode == BoosterMode.Filter) { __result = BoosterFilter.GenerateSieve(min, max, LocationBooster.WorldRadius.Value); BoosterDiagnostics.FilterAcceptedZones++; return false; }
+
+                if (mode == BoosterMode.SurveyPlus)//mode == BoosterMode.Survey ||
+                {
+                    int resolution = LocationBooster.SurveyScanResolution.Value;
+
+                    if (BoosterSurveyPlus.GetZone(currentLoc, out Vector2i surveyResult, resolution))
+                    {
+                        __result = surveyResult;
+                        BoosterDiagnostics.FilterAcceptedZones++;
+                        return false;
+                    }
+
+                    // Fallback to cached zone or zero if scan fails
+                    __result = BoosterReflection.CachedOccupiedZone ?? Vector2i.zero;
+                    return false;
+                }
+                return true;
+            }
+            finally { _insideGetRandomZone = false; }
         }
+
         public static IEnumerable<CodeInstruction> InnerLoopTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
         {
             var codes = instructions.ToList();
             Type currentType = original.DeclaringType;
-            string methodKey = $"{currentType.Name}::{original.Name}";
-
             string lastLogString = "";
             FieldInfo limitFieldFound = null;
 
-            // --- PASS 1: Pre-scan ---
+            // --- PASS 1: Pre-scan (CRITICAL: Populates Reflection Dictionaries) ---
             for (int i = 0; i < codes.Count; i++)
             {
                 var instruction = codes[i];
@@ -207,7 +186,7 @@ namespace LocationBudgetBooster
                 }
             }
 
-            // --- PASS 2: Modify ---
+            // --- PASS 2: Modify (The Actual Patches) ---
             int outerMult = LocationBooster.OuterMultiplier.Value;
             int innerMult = LocationBooster.InnerMultiplier.Value;
             int getRandomZoneIndex = codes.FindIndex(c => c.opcode == OpCodes.Call && c.operand is MethodInfo mi && mi.Name == "GetRandomZone");

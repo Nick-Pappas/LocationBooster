@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using UnityEngine;
+using UnityEngine.PlayerLoop;
 using static ZoneSystem;
 
 namespace LocationBudgetBooster
@@ -123,11 +124,11 @@ namespace LocationBudgetBooster
                 sb.AppendLine($"       Requires: {string.Join(" | ", reqs)}");
 
             // Survey mode specific: show candidate count
-            if (mode == BoosterMode.Survey)
-            {
-                int candidateCount = BoosterSurvey.GetCandidateCount(location);
-                sb.AppendLine($"       Valid Zones: {candidateCount:N0}");
-            }
+           // if (mode == BoosterMode.Survey)
+            //{
+            //    int candidateCount = BoosterSurvey.GetCandidateCount(location);
+            //    sb.AppendLine($"       Valid Zones: {candidateCount:N0}");
+            //}
 
             // World altitude profile
             if (GlobalMaxAltitudeSeen > float.MinValue)
@@ -278,7 +279,20 @@ namespace LocationBudgetBooster
             var data = BoosterAnalyzer.Analyze(instance);
             if (data == null) return;
 
-            // Fast-forward progress bar for abandoned attempts
+            // TRY RELAX FIRST
+            if (BoosterAdjuster.TryRelax(data))
+            {
+                // We are retrying! Do not fast-forward the progress bar failures yet,
+                // and do not mark as a permanent failure in the UI.
+                BoosterReporter.WriteReport(data, false); // Log the failure attempt
+                //Force the UI to update instantly to show the live relaxation stats
+                BoosterGlobalProgress.UpdateText();
+
+                Cleanup(data.InstanceHash, data.LocHash);
+                return; // Stop here. The loop will process the new queue entry next frame.
+            }
+
+            // Fast-forward progress bar for permanently abandoned attempts
             int remaining = data.Loc.m_quantity - data.Placed;
             for (int i = 0; i < remaining; i++)
             {

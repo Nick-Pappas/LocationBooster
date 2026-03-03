@@ -1,4 +1,4 @@
-﻿#nullable disable
+﻿/*#nullable disable
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
@@ -58,6 +58,18 @@ namespace LocationBudgetBooster
             }
 
             return allCandidates;
+        }
+
+        public static void ClearCache(int locHash)
+        {
+            if (_candidateCache.ContainsKey(locHash))
+                _candidateCache.Remove(locHash);
+
+            if (_zoneAttemptCounters.ContainsKey(locHash))
+                _zoneAttemptCounters.Remove(locHash);
+
+            if (_gaveUp.Contains(locHash))
+                _gaveUp.Remove(locHash);
         }
 
         public static bool GetZone(ZoneLocation location, out Vector2i result)
@@ -135,4 +147,4 @@ namespace LocationBudgetBooster
             }
         }
     }
-}
+}*/

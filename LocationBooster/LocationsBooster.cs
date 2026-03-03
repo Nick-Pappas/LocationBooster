@@ -3,83 +3,127 @@ using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
+using System.Linq;
 using System.Reflection;
 using UnityEngine;
+using System.IO;
 
 namespace LocationBudgetBooster
 {
     public enum BoosterMode
     {
-        Vanilla,    // Standard game behavior (Off)
-        Filter,     // Generate standard square, but reject if outside distance ring (Sieve)
-        Force,      // Generate directly inside distance ring (Donut Math)
-        Survey,         // Original 1-point survey (Center only)
-        SurveyPlus      // High-Res 9-point survey (Multi-bucket membership)
+        Vanilla,    // Off
+        Filter,     // Sieve (Reject outside ring)
+        Force,      // Donut (Math inside ring)
+        //Survey,     // Legacy 1-point (Fastest)
+        SurveyPlus  // High-Res Configurable set to 1x1 and heigh off to be exactly as legacy survey
     }
 
-
-    [BepInPlugin("nickpappas.locationbooster", "Location Budget Booster", "0.3.2")]
+    [BepInPlugin("nickpappas.locationbooster", "Location Budget Booster", "0.3.5")]
     public class LocationBooster : BaseUnityPlugin
     {
+        // 1. General
+        public static ConfigEntry<BoosterMode> Mode;
+        public static ConfigEntry<float> WorldRadius;
+
+        // 2. Survey Strategy
+        public static ConfigEntry<int> SurveyScanResolution;
+        public static ConfigEntry<int> SurveyVisitLimit;
+        public static ConfigEntry<bool> EnableAltitudeMapping;
+
+        // 3. Relaxation (Smart Recovery)
+        public static ConfigEntry<int> MaxRelaxationAttempts;
+        public static ConfigEntry<float> RelaxationMagnitude;
+
+        // 4. Performance Tuning
         public static ConfigEntry<int> OuterMultiplier;
         public static ConfigEntry<int> InnerMultiplier;
+
+        // 5. Logging & Diagnostics
         public static ConfigEntry<bool> LogSuccesses;
         public static ConfigEntry<bool> WriteToFile;
-        public static ConfigEntry<int> ProgressInterval;
         public static ConfigEntry<bool> DiagnosticMode;
+        public static ConfigEntry<int> ProgressInterval;
         public static ConfigEntry<int> InnerProgressInterval;
-        public static ConfigEntry<int> SurveyVisitLimit;
-
-        public static ConfigEntry<BoosterMode> Mode;
-        public static ConfigEntry<string> FilterTarget;
-        public static ConfigEntry<float> HildirCaveMinDistance;
-        public static ConfigEntry<float> HildirCaveMaxDistance;
-        public static ConfigEntry<float> WorldRadius;
 
         public static ManualLogSource Log;
         private static Harmony _harmony;
+        private static FileSystemWatcher _configWatcher;
 
         void Awake()
         {
             Log = Logger;
 
-            OuterMultiplier = Config.Bind("General", "OuterLoopMultiplier", 3, "Multiplies the budget for finding candidate Zones.");
-            InnerMultiplier = Config.Bind("General", "InnerLoopMultiplier", 5, "Multiplies placement attempts inside a valid Zone.");
-            Mode = Config.Bind("Strategy", "BoosterMode", BoosterMode.Vanilla, "Vanilla: Default behavior. Filter: Rejects zones outside range (fast). Force: Generates zones inside range (math).");
-            FilterTarget = Config.Bind("Strategy", "TargetLocation", "Hildir_cave", "The prefab name to apply Filter/Force modes to. Leave empty to apply to nothing.");
-            HildirCaveMinDistance = Config.Bind("DistanceFilter", "HildirCaveMinDistance", 0.1f, "Min distance fraction for Hildir_cave.");
-            HildirCaveMaxDistance = Config.Bind("DistanceFilter", "HildirCaveMaxDistance", 0.8f, "Max distance fraction for Hildir_cave.");
-            WorldRadius = Config.Bind("DistanceFilter", "WorldRadius", 10000f, "World radius in meters.");
-            LogSuccesses = Config.Bind("Logging", "LogSuccess", true, "Log successful placements.");
-            WriteToFile = Config.Bind("Logging", "WriteToFile", true, "Write diagnostics to a log file.");
-            ProgressInterval = Config.Bind("Logging", "ProgressInterval", 100000, "Log progress every N outer loop iterations.");
-            DiagnosticMode = Config.Bind("Logging", "DiagnosticMode", false, "Enable verbose debugging.");
-            InnerProgressInterval = Config.Bind("Logging", "InnerProgressInterval", 200000, "Log inner progress every N iterations. Set to 0 to disable.");
-            SurveyVisitLimit = Config.Bind("Strategy", "SurveyVisitLimit", 8, "How many times Survey mode revisits a zone before giving up on it.");
+            // --- SECTION 1: GENERAL ---
+            Mode = Config.Bind("1 - General", "BoosterMode", BoosterMode.SurveyPlus,
+                "Vanilla: Disabled.\nFilter: Rejects zones outside Min/Max distance.\nForce: Mathematically picks zones inside Min/Max distance.\nSurvey: Scans center of zone only (Fastest).\nSurveyPlus: Scans multiple points per zone based on Resolution.");
 
+            WorldRadius = Config.Bind("1 - General", "WorldRadius", 10000f,
+                "The max radius of the world in meters. Used for distance calculations.");
+
+            // --- SECTION 2: SURVEY STRATEGY ---
+            SurveyScanResolution = Config.Bind("2 - Survey Strategy", "ScanResolution", 3,
+                "Grid width for SurveyPlus. 1=1x1 (Center), 3=3x3 (9 points), 5=5x5 (25 points). Odd numbers recommended. Higher values find more valid zones but take longer to start.");
+
+            SurveyVisitLimit = Config.Bind("2 - Survey Strategy", "VisitLimit", 8,
+                "How many times the generator can revisit a single candidate zone before forcing it to pick a different one. Prevents clustering.");
+
+            EnableAltitudeMapping = Config.Bind("2 - Survey Strategy", "EnableAltitudeMapping", true,
+                "If True, samples terrain height during the survey (~10s overhead). Allows 'Smart Relaxation' to instantly fix altitude failures. If False, relaxation is iterative (slower generation, faster startup).");
+
+            // --- SECTION 3: RELAXATION ---
+            MaxRelaxationAttempts = Config.Bind("3 - Relaxation", "MaxAttempts", 4,
+                "How many times to relax requirements if a critical location fails to place. Set to 0 to disable relaxation.");
+
+            RelaxationMagnitude = Config.Bind("3 - Relaxation", "RelaxationMagnitude", 0.05f,
+                "Percentage to relax constraints per attempt (0.05 = 5%). E.g., a 200m altitude requirement becomes 190m.");
+
+            // --- SECTION 4: PERFORMANCE ---
+            OuterMultiplier = Config.Bind("4 - Performance", "OuterLoopMultiplier", 3,
+                "Multiplies Valheim's budget for finding candidate Zones. Higher = higher chance to find a valid biome.");
+
+            InnerMultiplier = Config.Bind("4 - Performance", "InnerLoopMultiplier", 5,
+                "Multiplies placement attempts inside a valid Zone. Higher = higher chance to fit the location in rough terrain.");
+
+            // --- SECTION 5: LOGGING ---
+            LogSuccesses = Config.Bind("5 - Logging", "LogSuccess", true, "Log every successful placement to the console/file.");
+            WriteToFile = Config.Bind("5 - Logging", "WriteToFile", true, "Write detailed diagnostics to BepInEx/LocationBooster.log.");
+            DiagnosticMode = Config.Bind("5 - Logging", "DiagnosticMode", false, "Enable verbose debugging (spammy).");
+            ProgressInterval = Config.Bind("5 - Logging", "ProgressInterval", 100000, "Log progress every N outer loop iterations.");
+            InnerProgressInterval = Config.Bind("5 - Logging", "InnerProgressInterval", 0, "Log inner placement loop progress every N iterations. 0 to disable.");
+
+            // Cleanup legacy config entries automatically
+            // We remove 'TargetLocation' and 'DistanceFilter' section entirely
+            var configKeys = Config.Keys.ToList();
+            foreach (var key in configKeys)
+            {
+                if (key.Section == "DistanceFilter" || (key.Section == "Strategy" && key.Key == "TargetLocation"))
+                    Config.Remove(key);
+            }
+
+            SetupConfigWatcher();
             BoosterDiagnostics.Initialize(Info.Metadata.Version.ToString());
 
             _harmony = new Harmony("nickpappas.locationbooster");
 
-            // 1. Patch GetRandomZone
+            // Patch Methods
             var getRandomZoneMethod = AccessTools.Method(typeof(ZoneSystem), nameof(ZoneSystem.GetRandomZone));
             if (getRandomZoneMethod != null)
-            {
-                _harmony.Patch(getRandomZoneMethod,
-                    prefix: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.GetRandomZonePrefix)));
-            }
+                _harmony.Patch(getRandomZoneMethod, prefix: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.GetRandomZonePrefix)));
 
-            // 2. Patch Breakdown Diagnostics
-            _harmony.Patch(
-                AccessTools.Method(typeof(WorldGenerator), nameof(WorldGenerator.GetBiome), new[] { typeof(Vector3) }),
-                postfix: new HarmonyMethod(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.CaptureWrongBiome))
-            );
-            _harmony.Patch(
-                AccessTools.Method(typeof(WorldGenerator), nameof(WorldGenerator.GetBiomeArea)),
-                postfix: new HarmonyMethod(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.CaptureWrongBiomeArea))
-            );
+            _harmony.Patch(AccessTools.Method(typeof(WorldGenerator), nameof(WorldGenerator.GetBiome), new[] { typeof(Vector3) }),
+                postfix: new HarmonyMethod(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.CaptureWrongBiome)));
 
-            // 3. Patch the Coroutines (The core logic)
+            _harmony.Patch(AccessTools.Method(typeof(WorldGenerator), nameof(WorldGenerator.GetBiomeArea)),
+                postfix: new HarmonyMethod(typeof(BoosterDiagnostics), nameof(BoosterDiagnostics.CaptureWrongBiomeArea)));
+
+            PatchCoroutines();
+
+            BoosterDiagnostics.WriteLog($"[Booster] Initialized. Mode: {Mode.Value}");
+        }
+
+        void PatchCoroutines()
+        {
             var zoneSystemType = typeof(ZoneSystem);
             var nestedTypes = zoneSystemType.GetNestedTypes(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static);
 
@@ -93,37 +137,50 @@ namespace LocationBudgetBooster
 
                     if (method != null)
                     {
-                        bool hasInnerLoopLogic = BoosterPatches.ScanForInnerLoop(method);
-                        bool hasOuterLoopLogic = BoosterPatches.ScanForOuterLoop(method);
+                        bool hasInner = BoosterPatches.ScanForInnerLoop(method);
+                        bool hasOuter = BoosterPatches.ScanForOuterLoop(method);
 
-                        if (hasOuterLoopLogic)
+                        if (hasOuter)
                         {
-                            // Outer Loop (Coordinator): Injects logic to RESET the flag when a new location is picked.
                             _harmony.Patch(method,
                                 prefix: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.OuterLoopPrefix)),
                                 postfix: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.OuterLoopPostfix)),
                                 transpiler: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.OuterLoopTranspiler)));
-                            BoosterDiagnostics.WriteLog($"[Booster] Patched Outer Loop (Reset Logic): {type.Name}");
                             BoosterPatches.PatchedTypes.Add(type.FullName);
                         }
-                        else if (hasInnerLoopLogic)
+                        else if (hasInner)
                         {
-                            // Inner Loop (Worker): Injects Kill Switch, Multipliers, and Logging.
-                            _harmony.Patch(method, prefix: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.InnerLoopPrefix)));
-                            _harmony.Patch(method, transpiler: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.InnerLoopTranspiler)));
-                            BoosterDiagnostics.WriteLog($"[Booster] Patched Inner Loop (Multipliers + Kill Switch): {type.Name}");
+                            _harmony.Patch(method,
+                                prefix: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.InnerLoopPrefix)),
+                                transpiler: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.InnerLoopTranspiler)));
                             BoosterPatches.PatchedTypes.Add(type.FullName);
                         }
                     }
                 }
             }
-
-            string target = string.IsNullOrWhiteSpace(FilterTarget.Value) ? "all locations" : FilterTarget.Value;
-            BoosterDiagnostics.WriteLog($"[Booster] Initialized. Mode: {Mode.Value} (applies to: {target})");
         }
+
+        private void SetupConfigWatcher()
+        {
+            _configWatcher = new FileSystemWatcher(Paths.ConfigPath, Path.GetFileName(Config.ConfigFilePath))
+            {
+                NotifyFilter = NotifyFilters.LastWrite,
+                EnableRaisingEvents = true,
+            };
+            _configWatcher.Changed += OnConfigChanged;
+        }
+
+        private void OnConfigChanged(object sender, FileSystemEventArgs e)
+        {
+            if (e.FullPath != Config.ConfigFilePath) return;
+            Logger.LogInfo("Configuration file has been modified. Reloading settings.");
+            Config.Reload();
+        }
+
 
         void OnDestroy()
         {
+            _configWatcher?.Dispose();
             BoosterDiagnostics.Dispose();
         }
     }

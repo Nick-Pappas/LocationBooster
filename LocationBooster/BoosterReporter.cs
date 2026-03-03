@@ -56,6 +56,11 @@ namespace LocationBudgetBooster
             LogLevel level = data.IsComplete ? LogLevel.Info : LogLevel.Warning;
 
             report.AppendLine($"[{status}] {data.Loc.m_prefabName}: {data.Placed}/{data.Loc.m_quantity}. Cost: {data.CurrentOuter:N0}/{data.LimitOuter:N0} outer loop budget and {data.InDist:N0} inner loop iterations.");
+            string relaxSummary = BoosterAdjuster.GetRelaxationSummary(data.Loc.m_prefabName, data.Loc);
+            if (!string.IsNullOrEmpty(relaxSummary))
+            {
+                report.AppendLine($"           {relaxSummary}");
+            }
             if (BoosterDiagnostics.GlobalMaxAltitudeSeen > float.MinValue) report.AppendLine($"(World Altitude Profile: Min {BoosterDiagnostics.GlobalMinAltitudeSeen:F1}m, Max {BoosterDiagnostics.GlobalMaxAltitudeSeen:F1}m)");
             report.AppendLine("────────────────────────────────────────────────────────");
 

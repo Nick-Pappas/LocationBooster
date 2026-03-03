@@ -13,8 +13,8 @@ namespace LocationBudgetBooster
     {
         private static bool _initialized = false;
         private static int _totalRequested = 0;
-        private static int _currentProcessed = 0; // "Y" (Attempted)
-        private static int _currentPlaced = 0;    // "K" (Successes)
+        private static int _currentProcessed = 0;
+        private static int _currentPlaced = 0;
         private static string _modeName = "Vanilla";
         private static DateTime _startTime;
 
@@ -41,12 +41,34 @@ namespace LocationBudgetBooster
             { "InfestedMine", 0.5f }, { "TarPit", 0.5f }, { "CharredFortress", 0.5f}
         };
 
+        // Helper for BoosterAdjuster
+        public static bool NeedsRelaxation(string prefabName, int placedCount, int requestedCount)
+        {
+            // CRITICAL FIX: Only relax Necessities if we have NONE.
+            // Once we have 1, the seed is playable. We do not bend rules for extras.
+            if (_necessities.Contains(prefabName))
+            {
+                return placedCount == 0;
+            }
+
+            // For Secondaries, relax only until we hit the "Questionable" threshold (e.g. 50%).
+            if (_secondaryGoals.TryGetValue(prefabName, out float requiredRate))
+            {
+                float actualRate = (float)placedCount / requestedCount;
+                return actualRate < requiredRate;
+            }
+
+            // For everything else (rocks, huts), never relax.
+            return false;
+        }
+
         public static void StartGeneration(ZoneSystem zs)
         {
             if (_initialized) return;
             _initialized = true;
 
             BoosterUI.EnsureInstance();
+            BoosterAdjuster.Reset(); // Clear relaxation attempts
 
             _startTime = DateTime.Now;
             _modeName = LocationBooster.Mode.Value.ToString();
@@ -119,9 +141,13 @@ namespace LocationBudgetBooster
             float attemptedPct = _totalRequested > 0 ? (100f * _currentProcessed / _totalRequested) : 0f;
             float successPct = _currentProcessed > 0 ? (100f * _currentPlaced / _currentProcessed) : 0f;
 
+            bool hasRelaxations = BoosterAdjuster.RelaxationAttempts.Any(kvp => kvp.Value > 0);
+
+            // Determine Priority Color (Red > Yellow > Blue > Green)
             string color = "#55FF55"; // Green
             if (_failedVitals.Count > 0) color = "#FF4444"; // Red
             else if (_failedSecondary.Count > 0) color = "#FFB75E"; // Yellow
+            else if (hasRelaxations) color = "#55AAFF"; // Blue
 
             // Compile Top Section
             var sbTop = new StringBuilder();
@@ -131,8 +157,10 @@ namespace LocationBudgetBooster
             sbTop.AppendLine($"<size=24>Successfully placed {_currentPlaced}/{_currentProcessed} ({successPct:0.00}%)</size>");
             StaticTopText = sbTop.ToString();
 
-            // Compile Bottom Section (Failures)
+            // Compile Bottom Section (Failures & Cheats)
             var sbBot = new StringBuilder();
+
+            // Render Failures
             if (_failedVitals.Count > 0)
             {
                 sbBot.AppendLine("\n<size=22><b>VITAL FAILURES:</b></size>");
@@ -145,6 +173,24 @@ namespace LocationBudgetBooster
                 foreach (var failure in _failedSecondary) sbBot.AppendLine($"<size=20>- {failure}</size>");
             }
             sbBot.Append("</color>");
+
+            // Render Relaxations (Always Blue)
+            if (hasRelaxations)
+            {
+                sbBot.AppendLine("\n<color=#55AAFF><size=22><b>RELAXED REQUIREMENTS:</b></size>");
+                foreach (var kvp in BoosterAdjuster.RelaxationAttempts)
+                {
+                    if (kvp.Value > 0)
+                    {
+                        var locData = ZoneSystem.instance.m_locations.FirstOrDefault(l => l.m_prefabName == kvp.Key);
+                        if (locData != null)
+                        {
+                            sbBot.AppendLine($"<size=20>- {kvp.Key} {BoosterAdjuster.GetRelaxationSummary(kvp.Key, locData)}</size>");
+                        }
+                    }
+                }
+                sbBot.Append("</color>");
+            }
 
             StaticBottomText = sbBot.ToString();
         }
@@ -160,6 +206,14 @@ namespace LocationBudgetBooster
             int totalActualPlaced = 0;
             var failedChecks = new List<string>();
             LogLevel logLevel = LogLevel.Info;
+
+            // Clean up Duplicate Location References from BoosterAdjuster
+            if (ZoneSystem.instance != null)
+            {
+                var distinctList = ZoneSystem.instance.m_locations.Distinct().ToList();
+                ZoneSystem.instance.m_locations.Clear();
+                ZoneSystem.instance.m_locations.AddRange(distinctList);
+            }
 
             // 1. Final Accurate Data Collection
             var finalCounts = new Dictionary<string, int>();
@@ -234,6 +288,28 @@ namespace LocationBudgetBooster
             summary.AppendLine($"  Total Placed:     {totalActualPlaced:N0} ({successRate:F2}%)");
             summary.AppendLine($"  Total Failed:     {totalFailed:N0}");
             summary.AppendLine($"  Playability:      {playabilityVerdict}");
+
+            // --- NEW: Print Relaxations Applied ---
+            var relaxedItems = new List<string>();
+            foreach (var kvp in BoosterAdjuster.RelaxationAttempts)
+            {
+                if (kvp.Value > 0)
+                {
+                    var locData = ZoneSystem.instance.m_locations.FirstOrDefault(l => l.m_prefabName == kvp.Key);
+                    if (locData != null)
+                    {
+                        relaxedItems.Add($"  - {kvp.Key} {BoosterAdjuster.GetRelaxationSummary(kvp.Key, locData)}");
+                    }
+                }
+            }
+
+            if (relaxedItems.Count > 0)
+            {
+                summary.AppendLine("-------------------------------------------------");
+                summary.AppendLine("  Relaxations Applied:");
+                foreach (var item in relaxedItems)
+                    summary.AppendLine(item);
+            }
 
             if (failedChecks.Count > 0)
             {
