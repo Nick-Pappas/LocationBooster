@@ -111,6 +111,22 @@ namespace LocationBudgetBooster
                         return false;
                     }
                 }
+                if (mode == BoosterMode.SurveyPlus)
+                {
+                    if (BoosterSurveyPlus.GetZone(currentLoc, out Vector2i surveyResult))
+                    {
+                        __result = surveyResult;
+                        BoosterDiagnostics.FilterAcceptedZones++;
+                        return false;
+                    }
+                    else
+                    {
+                        // Exhausted: Return the last known occupied zone (standard fail behavior)
+                        // or (0,0) to let the inner loop fail naturally.
+                        __result = BoosterReflection.CachedOccupiedZone ?? Vector2i.zero;
+                        return false;
+                    }
+                }
                 return true;
             }
             finally { _insideGetRandomZone = false; }

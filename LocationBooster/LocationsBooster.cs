@@ -13,7 +13,8 @@ namespace LocationBudgetBooster
         Vanilla,    // Standard game behavior (Off)
         Filter,     // Generate standard square, but reject if outside distance ring (Sieve)
         Force,      // Generate directly inside distance ring (Donut Math)
-        Survey      // My best idea for BC
+        Survey,         // Original 1-point survey (Center only)
+        SurveyPlus      // High-Res 9-point survey (Multi-bucket membership)
     }
 
 
