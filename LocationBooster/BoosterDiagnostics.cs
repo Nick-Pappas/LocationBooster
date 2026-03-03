@@ -245,26 +245,51 @@ namespace LocationBudgetBooster
             BoosterReporter.WriteReport(data, true, HeartbeatType.Outer);
         }
 
-        public static void ReportFailure(object instance)
-        {
-            var data = BoosterAnalyzer.Analyze(instance);
-            BoosterReporter.WriteReport(data, false);
-            Cleanup(data?.InstanceHash ?? 0, data?.LocHash ?? 0);
-        }
-
         public static void ReportSuccess(object instance)
         {
-            if (!LocationBooster.LogSuccesses.Value) return;
             var loc = BoosterReflection.GetLocation(instance);
-            if (BoosterReflection.CachedOccupiedZone == null && BoosterReflection.ZoneIDFields.TryGetValue(instance.GetType(), out var zField))
-                BoosterReflection.CachedOccupiedZone = (Vector2i)zField.GetValue(instance);
+            if (loc == null) return;
 
             var type = instance.GetType();
             int placed = (int)BoosterReflection.PlacedFields[type].GetValue(instance);
-            if (placed + 1 < loc.m_quantity) return;
-            var data = BoosterAnalyzer.Analyze(instance, placed + 1);
+
+            // Successfully processed one unit of work
+            BoosterGlobalProgress.IncrementProcessed(true);
+
+            // Report final statistics only when the batch is finished
+            if (placed + 1 >= loc.m_quantity)
+            {
+                BoosterGlobalProgress.RecordFinalLocationStats(loc.m_prefabName, placed + 1, loc.m_quantity);
+
+                if (LocationBooster.LogSuccesses.Value)
+                {
+                    if (BoosterReflection.CachedOccupiedZone == null && BoosterReflection.ZoneIDFields.TryGetValue(type, out var zField))
+                        BoosterReflection.CachedOccupiedZone = (Vector2i)zField.GetValue(instance);
+
+                    var data = BoosterAnalyzer.Analyze(instance, placed + 1);
+                    BoosterReporter.WriteReport(data, false);
+                    Cleanup(data?.InstanceHash ?? 0, data?.LocHash ?? 0);
+                }
+            }
+        }
+
+        public static void ReportFailure(object instance)
+        {
+            var data = BoosterAnalyzer.Analyze(instance);
+            if (data == null) return;
+
+            // Fast-forward progress bar for abandoned attempts
+            int remaining = data.Loc.m_quantity - data.Placed;
+            for (int i = 0; i < remaining; i++)
+            {
+                BoosterGlobalProgress.IncrementProcessed(false);
+            }
+
+            // Check if failure was critical
+            BoosterGlobalProgress.RecordFinalLocationStats(data.Loc.m_prefabName, data.Placed, data.Loc.m_quantity);
+
             BoosterReporter.WriteReport(data, false);
-            Cleanup(data?.InstanceHash ?? 0, data?.LocHash ?? 0);
+            Cleanup(data.InstanceHash, data.LocHash);
         }
 
         private static void Cleanup(int instanceHash, int locHash)

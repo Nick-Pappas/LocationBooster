@@ -76,7 +76,10 @@ namespace LocationBudgetBooster
             // Log START for all modes
             if (currentLoc.m_prefabName != _lastLoggedLocation)
             {
-                BoosterDiagnostics.LogLocationStart(currentLoc, mode);
+                if (LocationBooster.LogSuccesses.Value || LocationBooster.DiagnosticMode.Value)
+                {
+                    BoosterDiagnostics.LogLocationStart(currentLoc, mode);
+                }
                 _lastLoggedLocation = currentLoc.m_prefabName;
             }
 
@@ -125,7 +128,22 @@ namespace LocationBudgetBooster
                 }
             }
         }
+        public static void OuterLoopPrefix()
+        {
+            if (ZoneSystem.instance != null)
+            {
+                BoosterGlobalProgress.StartGeneration(ZoneSystem.instance);
+            }
+        }
 
+        public static void OuterLoopPostfix(ref bool __result)
+        {
+            // The coroutine's MoveNext returns false when the iteration is entirely finished
+            if (!__result)
+            {
+                BoosterGlobalProgress.EndGeneration();
+            }
+        }
         public static IEnumerable<CodeInstruction> InnerLoopTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
         {
             var codes = instructions.ToList();
@@ -153,7 +171,7 @@ namespace LocationBudgetBooster
                         if (codes[i + k].opcode == OpCodes.Stfld) { limitFieldFound = codes[i + k].operand as FieldInfo; BoosterReflection.LimitFields[currentType] = limitFieldFound; break; }
                     }
                 }
-                if (instruction.opcode == OpCodes.Ldfld && limitFieldFound != null && instruction.operand == limitFieldFound && i >= 2 && codes[i - 2].opcode == OpCodes.Ldfld)
+                if (instruction.opcode == OpCodes.Ldfld && limitFieldFound != null && (instruction.operand as FieldInfo) == limitFieldFound && i >= 2 && codes[i - 2].opcode == OpCodes.Ldfld)
                 {
                     BoosterReflection.CounterFields[currentType] = codes[i - 2].operand as FieldInfo;
                 }
@@ -231,7 +249,7 @@ namespace LocationBudgetBooster
                 yield return instruction;
 
                 // Progress Log
-                if (opcode == OpCodes.Stfld && BoosterReflection.CounterFields.TryGetValue(currentType, out var cf) && operand == cf)
+                if (opcode == OpCodes.Stfld && BoosterReflection.CounterFields.TryGetValue(currentType, out var cf) && (operand as FieldInfo) == cf)
                 {
                     if (LocationBooster.ProgressInterval.Value > 0)
                     {

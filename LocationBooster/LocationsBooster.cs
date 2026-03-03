@@ -98,7 +98,10 @@ namespace LocationBudgetBooster
                         if (hasOuterLoopLogic)
                         {
                             // Outer Loop (Coordinator): Injects logic to RESET the flag when a new location is picked.
-                            _harmony.Patch(method, transpiler: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.OuterLoopTranspiler)));
+                            _harmony.Patch(method,
+                                prefix: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.OuterLoopPrefix)),
+                                postfix: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.OuterLoopPostfix)),
+                                transpiler: new HarmonyMethod(typeof(BoosterPatches), nameof(BoosterPatches.OuterLoopTranspiler)));
                             BoosterDiagnostics.WriteLog($"[Booster] Patched Outer Loop (Reset Logic): {type.Name}");
                             BoosterPatches.PatchedTypes.Add(type.FullName);
                         }
