@@ -52,17 +52,15 @@ namespace LocationBudgetBooster
             BoosterDiagnostics.ResetInnerLoopCounter();
         }
 
-        public static IEnumerable<CodeInstruction> OuterLoopTranspiler(IEnumerable<CodeInstruction> instructions)
+        /// <summary>
+        /// Clears the last-logged location name so that when a relaxation re-queues
+        /// a location under the same prefab name, GetRandomZonePrefix will log a fresh
+        /// [START] entry for the retry rather than silently suppressing it.
+        /// Called by BoosterAdjuster.TryRelax after re-queuing.
+        /// </summary>
+        public static void ResetLocationLog()
         {
-            var codes = instructions.ToList();
-            for (int i = 0; i < codes.Count; i++)
-            {
-                yield return codes[i];
-                if (codes[i].opcode == OpCodes.Stfld && codes[i].operand is FieldInfo fi && fi.FieldType == typeof(ZoneLocation))
-                {
-                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterPatches), nameof(BoosterPatches.ResetAndPrepareForNewLocation)));
-                }
-            }
+            _lastLoggedLocation = "";
         }
 
         // --- INNER LOOP HOOKS ---
@@ -82,7 +80,6 @@ namespace LocationBudgetBooster
                 }
 
                 BoosterDiagnostics.ReportFailure(__instance);
-
                 __result = false;
                 return false;
             }
@@ -100,7 +97,7 @@ namespace LocationBudgetBooster
             if (currentLoc == null) return true;
             if (currentLoc.m_centerFirst) return true;
 
-            // Log START for all modes
+            // Log START for all modes — ResetLocationLog() clears this for relaxation retries
             if (currentLoc.m_prefabName != _lastLoggedLocation)
             {
                 if (LocationBooster.LogSuccesses.Value || LocationBooster.DiagnosticMode.Value)
@@ -118,10 +115,10 @@ namespace LocationBudgetBooster
                 float min = currentLoc.m_minDistance;
                 float max = currentLoc.m_maxDistance > 0.1f ? currentLoc.m_maxDistance : LocationBooster.WorldRadius.Value;
 
-                if (mode == BoosterMode.Force) { __result = BoosterForce.GenerateDonut(min, max); BoosterDiagnostics.FilterAcceptedZones++; return false; }
-                if (mode == BoosterMode.Filter) { __result = BoosterFilter.GenerateSieve(min, max, LocationBooster.WorldRadius.Value); BoosterDiagnostics.FilterAcceptedZones++; return false; }
+                if (mode == BoosterMode.Force)  { __result = BoosterForce.GenerateDonut(min, max); BoosterDiagnostics.FilterAcceptedZones++; return false; }
+                if (mode == BoosterMode.Filter)  { __result = BoosterFilter.GenerateSieve(min, max, LocationBooster.WorldRadius.Value); BoosterDiagnostics.FilterAcceptedZones++; return false; }
 
-                if (mode == BoosterMode.SurveyPlus)//mode == BoosterMode.Survey ||
+                if (mode == BoosterMode.SurveyPlus)
                 {
                     int resolution = LocationBooster.SurveyScanResolution.Value;
 
@@ -136,15 +133,30 @@ namespace LocationBudgetBooster
                     __result = BoosterReflection.CachedOccupiedZone ?? Vector2i.zero;
                     return false;
                 }
+
                 return true;
             }
             finally { _insideGetRandomZone = false; }
+        }
+
+        public static IEnumerable<CodeInstruction> OuterLoopTranspiler(IEnumerable<CodeInstruction> instructions)
+        {
+            var codes = instructions.ToList();
+            for (int i = 0; i < codes.Count; i++)
+            {
+                yield return codes[i];
+                if (codes[i].opcode == OpCodes.Stfld && codes[i].operand is FieldInfo fi && fi.FieldType == typeof(ZoneLocation))
+                {
+                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterPatches), nameof(BoosterPatches.ResetAndPrepareForNewLocation)));
+                }
+            }
         }
 
         public static IEnumerable<CodeInstruction> InnerLoopTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
         {
             var codes = instructions.ToList();
             Type currentType = original.DeclaringType;
+
             string lastLogString = "";
             FieldInfo limitFieldFound = null;
 
@@ -186,7 +198,7 @@ namespace LocationBudgetBooster
                 }
             }
 
-            // --- PASS 2: Modify (The Actual Patches) ---
+            // --- PASS 2: Modify ---
             int outerMult = LocationBooster.OuterMultiplier.Value;
             int innerMult = LocationBooster.InnerMultiplier.Value;
             int getRandomZoneIndex = codes.FindIndex(c => c.opcode == OpCodes.Call && c.operand is MethodInfo mi && mi.Name == "GetRandomZone");
@@ -333,7 +345,8 @@ namespace LocationBudgetBooster
                         }
                     }
                 }
-            next_instr:;
+
+                next_instr:;
             }
         }
     }

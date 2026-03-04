@@ -108,7 +108,6 @@ namespace LocationBudgetBooster
             StringBuilder sb = new StringBuilder();
             sb.AppendLine($"[START] Placing [{location.m_prefabName}]: {location.m_quantity} locations");
 
-            // Build requirements line
             var reqs = new List<string>();
             if (location.m_biome != 0) reqs.Add($"{location.m_biome}");
             float maxDist = location.m_maxDistance > 0.1f ? location.m_maxDistance : LocationBooster.WorldRadius.Value;
@@ -124,13 +123,12 @@ namespace LocationBudgetBooster
                 sb.AppendLine($"       Requires: {string.Join(" | ", reqs)}");
 
             // Survey mode specific: show candidate count
-           // if (mode == BoosterMode.Survey)
+            // if (mode == BoosterMode.Survey)
             //{
             //    int candidateCount = BoosterSurvey.GetCandidateCount(location);
             //    sb.AppendLine($"       Valid Zones: {candidateCount:N0}");
             //}
 
-            // World altitude profile
             if (GlobalMaxAltitudeSeen > float.MinValue)
                 sb.AppendLine($"       World Altitude: Min {GlobalMinAltitudeSeen:F1}m, Max {GlobalMaxAltitudeSeen:F1}m");
 
@@ -253,7 +251,7 @@ namespace LocationBudgetBooster
 
             var type = instance.GetType();
             int placed = (int)BoosterReflection.PlacedFields[type].GetValue(instance);
-
+            //WriteLog($"[DEBUG-RS] ReportSuccess: {loc.m_prefabName} placed={placed} qty={loc.m_quantity}");///DEBUG REMOVE
             // Successfully processed one unit of work
             BoosterGlobalProgress.IncrementProcessed(true);
 
@@ -262,12 +260,22 @@ namespace LocationBudgetBooster
             {
                 BoosterGlobalProgress.RecordFinalLocationStats(loc.m_prefabName, placed + 1, loc.m_quantity);
 
-                if (LocationBooster.LogSuccesses.Value)
+                bool wasRelaxed = BoosterAdjuster.RelaxationAttempts.TryGetValue(loc.m_prefabName, out int relaxCount) && relaxCount > 0;
+
+                // Always log if: success logging is on, OR this location needed relaxation to succeed.
+                // Relaxation success is always newsworthy regardless of the LogSuccesses config.
+                if (LocationBooster.LogSuccesses.Value || wasRelaxed)
                 {
                     if (BoosterReflection.CachedOccupiedZone == null && BoosterReflection.ZoneIDFields.TryGetValue(type, out var zField))
                         BoosterReflection.CachedOccupiedZone = (Vector2i)zField.GetValue(instance);
 
                     var data = BoosterAnalyzer.Analyze(instance, placed + 1);
+
+                    if (wasRelaxed)
+                        WriteTimestampedLog(
+                            $"[RELAXATION SUCCESS] {loc.m_prefabName} placed {placed + 1}/{loc.m_quantity} after {relaxCount} relaxation(s). {BoosterAdjuster.GetRelaxationSummary(loc.m_prefabName, loc)}",
+                            LogLevel.Message);
+
                     BoosterReporter.WriteReport(data, false);
                     Cleanup(data?.InstanceHash ?? 0, data?.LocHash ?? 0);
                 }
@@ -279,30 +287,25 @@ namespace LocationBudgetBooster
             var data = BoosterAnalyzer.Analyze(instance);
             if (data == null) return;
 
-            // TRY RELAX FIRST
+            // Log the failure with ORIGINAL constraint values FIRST, before TryRelax mutates the loc.
+            BoosterReporter.WriteReport(data, false);
+
+            // THEN attempt relaxation.
             if (BoosterAdjuster.TryRelax(data))
             {
-                // We are retrying! Do not fast-forward the progress bar failures yet,
-                // and do not mark as a permanent failure in the UI.
-                BoosterReporter.WriteReport(data, false); // Log the failure attempt
-                //Force the UI to update instantly to show the live relaxation stats
+                // We are retrying. Do not fast-forward the progress bar or mark as permanent failure.
+                // Just force the UI to reflect the new relaxation state.
                 BoosterGlobalProgress.UpdateText();
-
                 Cleanup(data.InstanceHash, data.LocHash);
-                return; // Stop here. The loop will process the new queue entry next frame.
+                return;
             }
 
-            // Fast-forward progress bar for permanently abandoned attempts
+            // Permanent failure — fast-forward progress bar for all remaining unplaced instances.
             int remaining = data.Loc.m_quantity - data.Placed;
             for (int i = 0; i < remaining; i++)
-            {
                 BoosterGlobalProgress.IncrementProcessed(false);
-            }
 
-            // Check if failure was critical
             BoosterGlobalProgress.RecordFinalLocationStats(data.Loc.m_prefabName, data.Placed, data.Loc.m_quantity);
-
-            BoosterReporter.WriteReport(data, false);
             Cleanup(data.InstanceHash, data.LocHash);
         }
 

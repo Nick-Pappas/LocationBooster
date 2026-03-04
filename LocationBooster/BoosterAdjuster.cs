@@ -11,6 +11,7 @@ namespace LocationBudgetBooster
         public class OriginalStats
         {
             public float MinAlt, MaxAlt, MinDist, MaxDist, MinTerr, MaxTerr, ExtRad;
+            public int Quantity;
         }
 
         public static Dictionary<string, int> RelaxationAttempts = new Dictionary<string, int>();
@@ -22,28 +23,40 @@ namespace LocationBudgetBooster
             _originalStats.Clear();
         }
 
+        /// <summary>
+        /// Restores all m_quantity values that were capped during relaxation.
+        /// Called from EndGeneration before final verdict.
+        /// </summary>
+        public static void RestoreQuantities()
+        {
+            var zs = ZoneSystem.instance;
+            if (zs == null) return;
+
+            foreach (var kvp in _originalStats)
+            {
+                var loc = zs.m_locations.Find(l => l.m_prefabName == kvp.Key);
+                if (loc != null && loc.m_quantity != kvp.Value.Quantity)
+                {
+                    loc.m_quantity = kvp.Value.Quantity;
+                    BoosterDiagnostics.WriteLog($"[Adjuster] Restored {kvp.Key} m_quantity to {kvp.Value.Quantity}.");
+                }
+            }
+        }
+
         public static bool TryRelax(ReportData data)
         {
             if (data == null || data.Loc == null) return false;
 
-            // --- PARANOID GUARD CLAUSE ---
-            // Explicitly check if relaxation is disabled in config.
             int maxAttempts = LocationBooster.MaxRelaxationAttempts.Value;
-            if (maxAttempts <= 0)
-            {
-                return false;
-            }
-            // -----------------------------
+            if (maxAttempts <= 0) return false;
 
             string prefabName = data.Loc.m_prefabName;
 
             // 1. Check if this prefab qualifies for relaxation
             if (!BoosterGlobalProgress.NeedsRelaxation(prefabName, data.Placed, data.Loc.m_quantity))
-            {
                 return false;
-            }
 
-            // 2. Track attempts & Cache original stats
+            // 2. Track attempts & cache original stats (first time only)
             if (!RelaxationAttempts.ContainsKey(prefabName))
             {
                 RelaxationAttempts[prefabName] = 0;
@@ -55,15 +68,17 @@ namespace LocationBudgetBooster
                     MaxDist = data.Loc.m_maxDistance,
                     MinTerr = data.Loc.m_minTerrainDelta,
                     MaxTerr = data.Loc.m_maxTerrainDelta,
-                    ExtRad = data.Loc.m_exteriorRadius
+                    ExtRad = data.Loc.m_exteriorRadius,
+                    Quantity = data.Loc.m_quantity
                 };
             }
 
             int attempts = RelaxationAttempts[prefabName];
-
             if (attempts >= maxAttempts)
             {
-                BoosterDiagnostics.WriteTimestampedLog($"[Adjuster] {prefabName} failed after {maxAttempts} relaxation attempts. Abandoning.", BepInEx.Logging.LogLevel.Warning);
+                BoosterDiagnostics.WriteTimestampedLog(
+                    $"[Adjuster] {prefabName} failed after {maxAttempts} relaxation attempts. Abandoning.",
+                    BepInEx.Logging.LogLevel.Warning);
                 return false;
             }
 
@@ -72,7 +87,6 @@ namespace LocationBudgetBooster
             // 3. Determine the primary bottleneck
             long maxErr = -1;
             string bottleneck = "Unknown";
-
             if (data.ErrAlt > maxErr) { maxErr = data.ErrAlt; bottleneck = "Altitude"; }
             if (data.ErrDist > maxErr) { maxErr = data.ErrDist; bottleneck = "Distance"; }
             if (data.ErrTerrain > maxErr) { maxErr = data.ErrTerrain; bottleneck = "Terrain"; }
@@ -80,33 +94,38 @@ namespace LocationBudgetBooster
 
             ApplyRelaxation(data.Loc, bottleneck, attempts + 1, maxAttempts);
 
-            // 4. Clear the survey cache so the next pass scans with the new requirements
-            try
+            // 4. Cap m_quantity to the minimum needed for playability.
+            //    Necessities: place exactly 1 (any 1 makes the game playable).
+            //    Secondaries: place just enough to reach the threshold.
+            int minimumNeeded = BoosterGlobalProgress.GetMinimumNeededCount(prefabName, _originalStats[prefabName].Quantity);
+            int alreadyPlaced = data.Placed;
+            int toPlace = Mathf.Max(1, minimumNeeded - alreadyPlaced);
+            if (toPlace < data.Loc.m_quantity)
             {
-                var type = Type.GetType("LocationBudgetBooster.BoosterSurveyPlus");
-                if (type != null)
-                {
-                    var method = type.GetMethod("ClearCache", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                    method?.Invoke(null, new object[] { data.LocHash });
-                }
+                data.Loc.m_quantity = toPlace;
+                BoosterDiagnostics.WriteLog($"   -> Capped m_quantity to {toPlace} for relaxation (need {minimumNeeded}, have {alreadyPlaced}).");
             }
-            catch { }
 
-            // 5. Re-queue for immediate retry
+            // 5. Clear the survey cache so the next pass rescans with the new requirements
+            BoosterSurveyPlus.ClearCache(data.LocHash);
+
+            // 6. Notify progress system — keeps GUI red until placement is confirmed
+            BoosterGlobalProgress.MarkRelaxationPending(prefabName);
+
+            // 7. Re-queue for immediate retry
             var zs = ZoneSystem.instance;
             if (zs != null)
             {
                 int currentIndex = zs.m_locations.IndexOf(data.Loc);
                 if (currentIndex >= 0 && currentIndex < zs.m_locations.Count)
-                {
                     zs.m_locations.Insert(currentIndex + 1, data.Loc);
-                }
                 else
-                {
                     zs.m_locations.Add(data.Loc);
-                }
             }
 
+            // 8. Reset the location-log guard so the retry gets a fresh [START] entry in the log
+            BoosterPatches.ResetLocationLog();
+            //BoosterDiagnostics.WriteLog($"[DEBUG-TR] TryRelax returning true for {prefabName}, re-queued at index {(zs?.m_locations.IndexOf(data.Loc) ?? -1)}"); // DEBUG REMOVE
             return true;
         }
 
@@ -114,15 +133,14 @@ namespace LocationBudgetBooster
         {
             float mag = LocationBooster.RelaxationMagnitude.Value;
 
-            // Added explicit logging of MaxAttempts to debug config issues
-            BoosterDiagnostics.WriteTimestampedLog($"[Adjuster] RELAXING {loc.m_prefabName} (Attempt {attemptNumber}/{maxAttempts}). Bottleneck: {bottleneck}. Re-queueing immediately.", BepInEx.Logging.LogLevel.Message);
+            BoosterDiagnostics.WriteTimestampedLog(
+                $"[Adjuster] RELAXING {loc.m_prefabName} (Attempt {attemptNumber}/{maxAttempts}). Bottleneck: {bottleneck}. Re-queueing immediately.",
+                BepInEx.Logging.LogLevel.Message);
 
             if (bottleneck == "Altitude")
             {
                 float stepDown = loc.m_minAltitude - Mathf.Max(5f, Mathf.Abs(loc.m_minAltitude) * mag);
 
-                // Only use data-driven shortcut if Altitude Mapping was ENABLED in config
-                // and we actually have valid data (GlobalMaxAltitudeSeen > MinValue)
                 if (LocationBooster.EnableAltitudeMapping.Value &&
                     BoosterDiagnostics.GlobalMaxAltitudeSeen > float.MinValue &&
                     loc.m_minAltitude > 0)
@@ -170,7 +188,7 @@ namespace LocationBudgetBooster
             if (!RelaxationAttempts.TryGetValue(prefabName, out int attempts) || attempts == 0) return "";
             if (!_originalStats.TryGetValue(prefabName, out var orig)) return $"(Relaxed {attempts} times)";
 
-            List<string> changes = new List<string>();
+            var changes = new List<string>();
             if (Mathf.Abs(currentLoc.m_minAltitude - orig.MinAlt) > 1f) changes.Add($"MinAlt: {orig.MinAlt:F0}->{currentLoc.m_minAltitude:F0}");
             if (Mathf.Abs(currentLoc.m_maxDistance - orig.MaxDist) > 1f) changes.Add($"MaxDist: {orig.MaxDist:F0}->{currentLoc.m_maxDistance:F0}");
             if (Mathf.Abs(currentLoc.m_minDistance - orig.MinDist) > 1f) changes.Add($"MinDist: {orig.MinDist:F0}->{currentLoc.m_minDistance:F0}");
