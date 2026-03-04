@@ -26,9 +26,11 @@ namespace LocationBudgetBooster
         private static HashSet<string> _failedSecondary = new HashSet<string>();
         private static List<ZoneLocation> _validLocations = new List<ZoneLocation>();
 
-        // Tracks necessities/secondaries currently being retried after relaxation.
-        // While any entry is here the GUI stays RED — we have not confirmed success yet.
-        private static HashSet<string> _pendingRelaxation = new HashSet<string>();
+        // Relaxation State:
+        //   Queued  = relaxed, sitting at end of list, not yet retried  → amber
+        //   Pending = currently being retried right now                 → red
+        private static HashSet<string> _relaxationQueued = new HashSet<string>();
+        private static HashSet<string> _relaxationPending = new HashSet<string>();
 
         // Necessities: Unplayable if any are 0 on the map at the end
         private static readonly HashSet<string> _necessities = new HashSet<string>
@@ -38,52 +40,71 @@ namespace LocationBudgetBooster
             "Hildir_camp", "BogWitch_Camp", "Hildir_crypt", "Hildir_cave", "Hildir_plainsfortress"
         };
 
-        // Secondary: Questionable if they fail to meet this percentage of their requested quantity
+        // Secondaries: Questionable if they fail to meet this percentage of requested quantity
         private static readonly Dictionary<string, float> _secondaryGoals = new Dictionary<string, float>
         {
             { "Crypt", 0.5f }, { "SunkenCrypt", 0.5f }, { "MountainCave", 0.5f },
-            { "InfestedMine", 0.5f }, { "TarPit", 0.5f }, { "CharredFortress", 0.5f}
+            { "InfestedMine", 0.5f }, { "TarPit", 0.5f }, { "CharredFortress", 0.5f }
         };
 
-        // Helper for BoosterAdjuster: should we attempt relaxation for this location right now?
+        // --- RELAXATION STATE API ---
+
+        /// <summary>
+        /// Called by TryRelax when a location is relaxed and queued at the end of the list.
+        /// GUI shows amber: "will retry later."
+        /// </summary>
+        public static void MarkRelaxationQueued(string prefabName)
+        {
+            _relaxationQueued.Add(prefabName);
+            _relaxationPending.Remove(prefabName);
+            UpdateText();
+        }
+
+        /// <summary>
+        /// Called by GetRandomZonePrefix when a queued location begins its retry pass.
+        /// Transitions amber → red: "retrying right now."
+        /// No-op if the location was not queued.
+        /// </summary>
+        public static void TransitionToRetrying(string prefabName)
+        {
+            if (!_relaxationQueued.Contains(prefabName)) return;
+            _relaxationQueued.Remove(prefabName);
+            _relaxationPending.Add(prefabName);
+            UpdateText();
+        }
+
+        /// <summary>
+        /// Removes a location from both relaxation tracking sets.
+        /// Called when the retry successfully places at least one instance.
+        /// </summary>
+        public static void ClearRelaxationState(string prefabName)
+        {
+            _relaxationPending.Remove(prefabName);
+            _relaxationQueued.Remove(prefabName);
+        }
+
+        // --- HELPERS ---
+
         public static bool NeedsRelaxation(string prefabName, int placedCount, int requestedCount)
         {
             if (_necessities.Contains(prefabName))
                 return placedCount == 0;
 
             if (_secondaryGoals.TryGetValue(prefabName, out float requiredRate))
-            {
-                float actualRate = (float)placedCount / requestedCount;
-                return actualRate < requiredRate;
-            }
+                return (float)placedCount / requestedCount < requiredRate;
 
             return false;
         }
 
-        /// <summary>
-        /// Returns the minimum number of placements required for this location to be
-        /// considered "no longer a problem". Used to cap m_quantity on relaxation re-queues.
-        /// </summary>
         public static int GetMinimumNeededCount(string prefabName, int requestedCount)
         {
-            if (_necessities.Contains(prefabName))
-                return 1;
-
+            if (_necessities.Contains(prefabName)) return 1;
             if (_secondaryGoals.TryGetValue(prefabName, out float requiredRate))
                 return Mathf.Max(1, Mathf.CeilToInt(requestedCount * requiredRate));
-
             return requestedCount;
         }
 
-        /// <summary>
-        /// Called by BoosterAdjuster when a location enters the relaxation retry queue.
-        /// Keeps the GUI red until RecordFinalLocationStats confirms actual placement.
-        /// </summary>
-        public static void MarkRelaxationPending(string prefabName)
-        {
-            _pendingRelaxation.Add(prefabName);
-            UpdateText();
-        }
+        // --- LIFECYCLE ---
 
         public static void StartGeneration(ZoneSystem zs)
         {
@@ -108,40 +129,27 @@ namespace LocationBudgetBooster
             _currentPlaced = 0;
             _failedVitals.Clear();
             _failedSecondary.Clear();
-            _pendingRelaxation.Clear();
+            _relaxationQueued.Clear();
+            _relaxationPending.Clear();
 
             UpdateText();
             BoosterDiagnostics.WriteTimestampedLog($"=== GLOBAL START: Generating Locations ({_modeName}) ===");
-        }
-
-        private static int GetActualPlacedCount(string prefabName)
-        {
-            if (ZoneSystem.instance == null) return 0;
-            int count = 0;
-            foreach (var kvp in ZoneSystem.instance.m_locationInstances)
-            {
-                if (kvp.Value.m_location.m_prefabName == prefabName) count++;
-            }
-            return count;
         }
 
         public static void IncrementProcessed(bool successfullyPlaced)
         {
             _currentProcessed++;
             if (successfullyPlaced) _currentPlaced++;
-
             if (_currentProcessed > _totalRequested) _currentProcessed = _totalRequested;
             if (_currentPlaced > _currentProcessed) _currentPlaced = _currentProcessed;
-
             UpdateText();
         }
 
         public static void RecordFinalLocationStats(string locationName, int placedCount, int requestedCount)
         {
-            // If this location was pending relaxation and now has placements, it succeeded.
-            // Remove from pending so the GUI can update correctly.
-            if (_pendingRelaxation.Contains(locationName) && placedCount > 0)
-                _pendingRelaxation.Remove(locationName);
+            // If this was a pending retry and it placed something, clear the relaxation state
+            if (_relaxationPending.Contains(locationName) && placedCount > 0)
+                ClearRelaxationState(locationName);
 
             if (_necessities.Contains(locationName) && placedCount == 0)
                 _failedVitals.Add($"{locationName} (0/{requestedCount})");
@@ -151,7 +159,17 @@ namespace LocationBudgetBooster
                 if (actualRate < requiredRate)
                     _failedSecondary.Add($"{locationName} ({placedCount}/{requestedCount})");
             }
+
             UpdateText();
+        }
+
+        private static int GetActualPlacedCount(string prefabName)
+        {
+            if (ZoneSystem.instance == null) return 0;
+            int count = 0;
+            foreach (var kvp in ZoneSystem.instance.m_locationInstances)
+                if (kvp.Value.m_location.m_prefabName == prefabName) count++;
+            return count;
         }
 
         public static void UpdateText()
@@ -162,21 +180,21 @@ namespace LocationBudgetBooster
             float successPct = _currentProcessed > 0 ? (100f * _currentPlaced / _currentProcessed) : 0f;
 
             bool hasRelaxations = BoosterAdjuster.RelaxationAttempts.Any(kvp => kvp.Value > 0);
-            bool relaxationPending = _pendingRelaxation.Count > 0;
+            bool hasQueued = _relaxationQueued.Count > 0;
+            bool hasPending = _relaxationPending.Count > 0;
 
-            // Priority: Red > Yellow > Red-pending-relaxation > Blue > Green
-            // Red-pending-relaxation: we relaxed but have not confirmed success yet.
+            // Priority: Red > Amber > Yellow > Blue > Green
             string color;
-            if (_failedVitals.Count > 0)
-                color = "#FF4444"; // Red — confirmed vital failure
+            if (_failedVitals.Count > 0 || hasPending)
+                color = "#FF4444";  // Red — confirmed vital failure OR active retry
+            else if (hasQueued)
+                color = "#FF8C00";  // Amber — relaxed, waiting for end-of-queue retry
             else if (_failedSecondary.Count > 0)
-                color = "#FFB75E"; // Yellow — confirmed secondary shortfall
-            else if (relaxationPending)
-                color = "#FF4444"; // Red — vital pending confirmation after relaxation
+                color = "#FFB75E";  // Yellow — secondary shortfall
             else if (hasRelaxations)
-                color = "#55AAFF"; // Blue — relaxation succeeded
+                color = "#55AAFF";  // Blue — relaxation succeeded, all clear
             else
-                color = "#55FF55"; // Green — all good, no intervention needed
+                color = "#55FF55";  // Green
 
             var sbTop = new StringBuilder();
             sbTop.AppendLine($"<color={color}>");
@@ -190,35 +208,54 @@ namespace LocationBudgetBooster
             if (_failedVitals.Count > 0)
             {
                 sbBot.AppendLine("\n<size=22><b>VITAL FAILURES:</b></size>");
-                foreach (var failure in _failedVitals) sbBot.AppendLine($"<size=20>- {failure}</size>");
+                foreach (var f in _failedVitals) sbBot.AppendLine($"<size=20>- {f}</size>");
             }
 
             if (_failedSecondary.Count > 0)
             {
                 sbBot.AppendLine("\n<size=22><b>QUESTIONABLE:</b></size>");
-                foreach (var failure in _failedSecondary) sbBot.AppendLine($"<size=20>- {failure}</size>");
+                foreach (var f in _failedSecondary) sbBot.AppendLine($"<size=20>- {f}</size>");
             }
 
-            // Show pending relaxations in red section so the user knows what's being retried
-            if (relaxationPending)
-            {
-                sbBot.AppendLine("\n<size=22><b>RETRYING (relaxed):</b></size>");
-                foreach (var name in _pendingRelaxation) sbBot.AppendLine($"<size=20>- {name}</size>");
-            }
             sbBot.Append("</color>");
 
-            // Confirmed relaxation successes shown in blue
-            if (hasRelaxations && !relaxationPending)
+            // Amber block — queued for end-of-run retry
+            if (hasQueued)
+            {
+                sbBot.AppendLine("\n<color=#FF8C00><size=22><b>QUEUED FOR RETRY (relaxed):</b></size>");
+                foreach (var name in _relaxationQueued)
+                {
+                    var locData = ZoneSystem.instance?.m_locations.FirstOrDefault(l => l.m_prefabName == name);
+                    string summary = locData != null ? BoosterAdjuster.GetRelaxationSummary(name, locData) : "";
+                    sbBot.AppendLine($"<size=20>- {name} {summary}</size>");
+                }
+                sbBot.Append("</color>");
+            }
+
+            // Red block — actively retrying right now
+            if (hasPending)
+            {
+                sbBot.AppendLine("\n<color=#FF4444><size=22><b>RETRYING (relaxed):</b></size>");
+                foreach (var name in _relaxationPending)
+                    sbBot.AppendLine($"<size=20>- {name}</size>");
+                sbBot.Append("</color>");
+            }
+
+            // Blue block — relaxations that are fully resolved
+            var resolved = BoosterAdjuster.RelaxationAttempts
+                .Where(kvp => kvp.Value > 0
+                    && !_relaxationQueued.Contains(kvp.Key)
+                    && !_relaxationPending.Contains(kvp.Key))
+                .ToList();
+
+            if (resolved.Count > 0)
             {
                 sbBot.AppendLine("\n<color=#55AAFF><size=22><b>RELAXED REQUIREMENTS:</b></size>");
-                foreach (var kvp in BoosterAdjuster.RelaxationAttempts)
+                foreach (var kvp in resolved)
                 {
-                    if (kvp.Value > 0)
-                    {
-                        var locData = ZoneSystem.instance.m_locations.FirstOrDefault(l => l.m_prefabName == kvp.Key);
-                        if (locData != null)
-                            sbBot.AppendLine($"<size=20>- {kvp.Key} {BoosterAdjuster.GetRelaxationSummary(kvp.Key, locData)}</size>");
-                    }
+                    var locData = ZoneSystem.instance?.m_locations.FirstOrDefault(l => l.m_prefabName == kvp.Key);
+                    if (locData != null)
+                        sbBot.AppendLine($"<size=20>- {kvp.Key} {BoosterAdjuster.GetRelaxationSummary(kvp.Key, locData)}</size>");
                 }
                 sbBot.Append("</color>");
             }
@@ -234,10 +271,11 @@ namespace LocationBudgetBooster
             var elapsedTime = endTime - _startTime;
             string timeString = $"{(int)elapsedTime.TotalMinutes}m {elapsedTime.Seconds}.{elapsedTime.Milliseconds / 100}s";
 
-            // Restore any m_quantity values that were capped during relaxation
-            BoosterAdjuster.RestoreQuantities();
+            int totalActualPlaced = 0;
+            var failedChecks = new List<string>();
+            LogLevel logLevel = LogLevel.Info;
 
-            // Clean up duplicate Location References inserted by BoosterAdjuster during relaxation
+            // Clean up duplicates from re-queuing
             if (ZoneSystem.instance != null)
             {
                 var distinctList = ZoneSystem.instance.m_locations.Distinct().ToList();
@@ -245,38 +283,25 @@ namespace LocationBudgetBooster
                 ZoneSystem.instance.m_locations.AddRange(distinctList);
             }
 
-            // 1. Final Accurate Data Collection from world truth (m_locationInstances).
-            // We build from both _validLocations and m_locationInstances to handle locations
-            // that weren't IsValid at StartGeneration time (BetterContinents/ExpandWorld timing).
-            int totalActualPlaced = 0;
+            // Restore any m_quantity values capped during relaxation
+            BoosterAdjuster.RestoreQuantities();
+
+            // Count placements — query world truth directly
             var finalCounts = new Dictionary<string, int>();
-
-            var allPrefabNames = new HashSet<string>(_validLocations.Select(l => l.m_prefabName));
-            if (ZoneSystem.instance != null)
+            foreach (var loc in _validLocations)
             {
-                foreach (var kvp in ZoneSystem.instance.m_locationInstances)
-                    allPrefabNames.Add(kvp.Value.m_location.m_prefabName);
-            }
-
-            foreach (var prefabName in allPrefabNames)
-            {
-                if (!finalCounts.ContainsKey(prefabName))
+                if (!finalCounts.ContainsKey(loc.m_prefabName))
                 {
-                    int count = GetActualPlacedCount(prefabName);
-                    finalCounts[prefabName] = count;
+                    int count = GetActualPlacedCount(loc.m_prefabName);
+                    finalCounts[loc.m_prefabName] = count;
                     totalActualPlaced += count;
                 }
             }
 
-            // 2. Playability Analysis
-            // Necessities: query world truth directly — never gate on _validLocations membership
-            var failedChecks = new List<string>();
-            LogLevel logLevel = LogLevel.Info;
-
+            // Playability — necessities checked via world truth
             foreach (string necessity in _necessities)
             {
-                int count = GetActualPlacedCount(necessity);
-                if (count == 0)
+                if (GetActualPlacedCount(necessity) == 0)
                     failedChecks.Add($"Missing required location: {necessity}");
             }
 
@@ -292,30 +317,20 @@ namespace LocationBudgetBooster
                 {
                     var locData = _validLocations.FirstOrDefault(l => l.m_prefabName == goal.Key);
                     if (locData == null || locData.m_quantity == 0) continue;
-
-                    finalCounts.TryGetValue(goal.Key, out int placed);
+                    if (!finalCounts.TryGetValue(goal.Key, out int placed)) continue;
                     float placedRate = (float)placed / locData.m_quantity;
-
                     if (placedRate < goal.Value)
                         failedChecks.Add($"{goal.Key} (placed {placed}/{locData.m_quantity}, required {goal.Value:P0})");
                 }
 
-                if (failedChecks.Count > 0)
-                {
-                    playabilityVerdict = "Questionable";
-                    logLevel = LogLevel.Warning;
-                }
-                else
-                {
-                    playabilityVerdict = "Playable";
-                }
+                playabilityVerdict = failedChecks.Count > 0 ? "Questionable" : "Playable";
+                if (failedChecks.Count > 0) logLevel = LogLevel.Warning;
             }
 
             int totalFailed = _totalRequested - totalActualPlaced;
             if (totalFailed < 0) totalFailed = 0;
             float successRate = _totalRequested > 0 ? (totalActualPlaced * 100f / _totalRequested) : 100f;
 
-            // 3. Final Summary Report
             BoosterDiagnostics.WriteTimestampedLog($"=== GLOBAL END: Generating Locations ({_modeName}) ===");
 
             var summary = new StringBuilder();
@@ -330,23 +345,17 @@ namespace LocationBudgetBooster
             summary.AppendLine($"  Total Failed:     {totalFailed:N0}");
             summary.AppendLine($"  Playability:      {playabilityVerdict}");
 
-            var relaxedItems = new List<string>();
-            foreach (var kvp in BoosterAdjuster.RelaxationAttempts)
-            {
-                if (kvp.Value > 0)
-                {
-                    var locData = ZoneSystem.instance.m_locations.FirstOrDefault(l => l.m_prefabName == kvp.Key);
-                    if (locData != null)
-                        relaxedItems.Add($"  - {kvp.Key} {BoosterAdjuster.GetRelaxationSummary(kvp.Key, locData)}");
-                }
-            }
-
+            var relaxedItems = BoosterAdjuster.RelaxationAttempts.Where(kvp => kvp.Value > 0).ToList();
             if (relaxedItems.Count > 0)
             {
                 summary.AppendLine("-------------------------------------------------");
                 summary.AppendLine("  Relaxations Applied:");
-                foreach (var item in relaxedItems)
-                    summary.AppendLine(item);
+                foreach (var kvp in relaxedItems)
+                {
+                    var locData = ZoneSystem.instance?.m_locations.FirstOrDefault(l => l.m_prefabName == kvp.Key);
+                    if (locData != null)
+                        summary.AppendLine($"  - {kvp.Key} {BoosterAdjuster.GetRelaxationSummary(kvp.Key, locData)}");
+                }
             }
 
             if (failedChecks.Count > 0)
@@ -419,14 +428,16 @@ namespace LocationBudgetBooster
                 }
 
                 var rect = new Rect(Screen.width - 670, 20, 650, Screen.height - 40);
-                int index = (int)(Time.realtimeSinceStartup * 8f) % _spinner.Length;
 
+                int index = (int)(Time.realtimeSinceStartup * 8f) % _spinner.Length;
                 string currentPrefab = BoosterReflection.CurrentLocationForFilter != null
                     ? BoosterReflection.CurrentLocationForFilter.m_prefabName
                     : "Finished";
                 string currentLine = $"<size=22>Current: {currentPrefab}  {_spinner[index]}</size>\n";
 
-                GUI.Label(rect, StaticTopText + currentLine + StaticBottomText, _style);
+                string fullMessage = StaticTopText + currentLine + StaticBottomText;
+
+                GUI.Label(rect, fullMessage, _style);
             }
         }
     }

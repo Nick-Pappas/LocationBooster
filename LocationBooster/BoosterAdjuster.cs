@@ -1,6 +1,8 @@
 ﻿#nullable disable
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using UnityEngine;
 using static ZoneSystem;
 
@@ -16,11 +18,18 @@ namespace LocationBudgetBooster
 
         public static Dictionary<string, int> RelaxationAttempts = new Dictionary<string, int>();
         private static Dictionary<string, OriginalStats> _originalStats = new Dictionary<string, OriginalStats>();
+        public static object CapturedOuterLoop = null;
+
+        public static void CaptureStateMachine(object sm)
+        {
+            CapturedOuterLoop = sm;
+        }
 
         public static void Reset()
         {
             RelaxationAttempts.Clear();
             _originalStats.Clear();
+            CapturedOuterLoop = null;
         }
 
         /// <summary>
@@ -94,9 +103,7 @@ namespace LocationBudgetBooster
 
             ApplyRelaxation(data.Loc, bottleneck, attempts + 1, maxAttempts);
 
-            // 4. Cap m_quantity to the minimum needed for playability.
-            //    Necessities: place exactly 1 (any 1 makes the game playable).
-            //    Secondaries: place just enough to reach the threshold.
+            // 4. Cap m_quantity to the minimum needed for playability
             int minimumNeeded = BoosterGlobalProgress.GetMinimumNeededCount(prefabName, _originalStats[prefabName].Quantity);
             int alreadyPlaced = data.Placed;
             int toPlace = Mathf.Max(1, minimumNeeded - alreadyPlaced);
@@ -106,26 +113,54 @@ namespace LocationBudgetBooster
                 BoosterDiagnostics.WriteLog($"   -> Capped m_quantity to {toPlace} for relaxation (need {minimumNeeded}, have {alreadyPlaced}).");
             }
 
-            // 5. Clear the survey cache so the next pass rescans with the new requirements
+            // 5. Clear the survey cache so the retry rescans with new requirements
             BoosterSurveyPlus.ClearCache(data.LocHash);
 
-            // 6. Notify progress system — keeps GUI red until placement is confirmed
-            BoosterGlobalProgress.MarkRelaxationPending(prefabName);
-
-            // 7. Re-queue for immediate retry
-            var zs = ZoneSystem.instance;
-            if (zs != null)
+            // 6. Insert immediately after the current index in the outer loop's <ordered>5__4 list.
+            //    This makes the retry run next, while all previously-placed prioritized locations
+            //    are already settled — giving relaxation the most relevant world state possible.
+            bool inserted = false;
+            if (CapturedOuterLoop != null)
             {
-                int currentIndex = zs.m_locations.IndexOf(data.Loc);
-                if (currentIndex >= 0 && currentIndex < zs.m_locations.Count)
-                    zs.m_locations.Insert(currentIndex + 1, data.Loc);
+                var smType = CapturedOuterLoop.GetType();
+                var orderedField = smType.GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
+                    .FirstOrDefault(f => f.FieldType == typeof(List<ZoneLocation>) && f.Name.Contains("ordered"));
+                var indexField = smType.GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
+                    .FirstOrDefault(f => f.FieldType == typeof(int) && f.Name.Contains("<i>"));
+
+                if (orderedField != null && indexField != null)
+                {
+                    var ordered = orderedField.GetValue(CapturedOuterLoop) as List<ZoneLocation>;
+                    int idx = (int)indexField.GetValue(CapturedOuterLoop);
+                    if (ordered != null)
+                    {
+                        int insertAt = Math.Min(idx + 1, ordered.Count);
+                        ordered.Insert(insertAt, data.Loc);
+                        inserted = true;
+                        BoosterDiagnostics.WriteLog($"[Adjuster] {prefabName} inserted at index {insertAt} in <ordered> (current i={idx}) for immediate retry.");
+                    }
+                }
                 else
-                    zs.m_locations.Add(data.Loc);
+                {
+                    BoosterDiagnostics.WriteLog($"[Adjuster] WARNING: Could not reflect <ordered> or <i> fields on {CapturedOuterLoop.GetType().Name}.");
+                }
             }
 
-            // 8. Reset the location-log guard so the retry gets a fresh [START] entry in the log
+            if (!inserted)
+            {
+                BoosterDiagnostics.WriteLog($"[Adjuster] WARNING: Falling back to m_locations.Add for {prefabName} (CapturedOuterLoop={(CapturedOuterLoop == null ? "null" : "set")}).");
+                var zs = ZoneSystem.instance;
+                if (zs != null) zs.m_locations.Add(data.Loc);
+            }
+
+            // 7. Reset the location-log guard so the retry logs a fresh [START] entry
             BoosterPatches.ResetLocationLog();
-            //BoosterDiagnostics.WriteLog($"[DEBUG-TR] TryRelax returning true for {prefabName}, re-queued at index {(zs?.m_locations.IndexOf(data.Loc) ?? -1)}"); // DEBUG REMOVE
+
+            // 8. Notify GUI: amber "QUEUED FOR RETRY" until the retry actually starts
+            BoosterGlobalProgress.MarkRelaxationQueued(prefabName);
+
+            BoosterDiagnostics.WriteLog($"[Adjuster] {prefabName} re-queued for retry.");
+
             return true;
         }
 
@@ -134,7 +169,7 @@ namespace LocationBudgetBooster
             float mag = LocationBooster.RelaxationMagnitude.Value;
 
             BoosterDiagnostics.WriteTimestampedLog(
-                $"[Adjuster] RELAXING {loc.m_prefabName} (Attempt {attemptNumber}/{maxAttempts}). Bottleneck: {bottleneck}. Re-queueing immediately.",
+                $"[Adjuster] RELAXING {loc.m_prefabName} (Attempt {attemptNumber}/{maxAttempts}). Bottleneck: {bottleneck}. Queued at end of list.",
                 BepInEx.Logging.LogLevel.Message);
 
             if (bottleneck == "Altitude")

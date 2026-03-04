@@ -30,20 +30,17 @@ namespace LocationBudgetBooster
         }
 
         // --- OUTER LOOP HOOKS ---
-        public static void OuterLoopPrefix()
+        public static void OuterLoopPrefix(object __instance)
         {
+            BoosterAdjuster.CaptureStateMachine(__instance);
             if (ZoneSystem.instance != null)
-            {
                 BoosterGlobalProgress.StartGeneration(ZoneSystem.instance);
-            }
         }
 
         public static void OuterLoopPostfix(ref bool __result)
         {
             if (!__result)
-            {
                 BoosterGlobalProgress.EndGeneration();
-            }
         }
 
         public static void ResetAndPrepareForNewLocation()
@@ -66,7 +63,6 @@ namespace LocationBudgetBooster
         // --- INNER LOOP HOOKS ---
         public static bool InnerLoopPrefix(object __instance, ref bool __result)
         {
-            // Fixes the 8-second delay by checking the correct SurveyPlus flag
             if (BoosterSurveyPlus.SurveyExhausted)
             {
                 if (BoosterReflection.IterationsPkgField != null)
@@ -97,13 +93,13 @@ namespace LocationBudgetBooster
             if (currentLoc == null) return true;
             if (currentLoc.m_centerFirst) return true;
 
-            // Log START for all modes — ResetLocationLog() clears this for relaxation retries
             if (currentLoc.m_prefabName != _lastLoggedLocation)
             {
+                BoosterGlobalProgress.TransitionToRetrying(currentLoc.m_prefabName);
+
                 if (LocationBooster.LogSuccesses.Value || LocationBooster.DiagnosticMode.Value)
-                {
                     BoosterDiagnostics.LogLocationStart(currentLoc, mode);
-                }
+
                 _lastLoggedLocation = currentLoc.m_prefabName;
             }
 
@@ -115,8 +111,8 @@ namespace LocationBudgetBooster
                 float min = currentLoc.m_minDistance;
                 float max = currentLoc.m_maxDistance > 0.1f ? currentLoc.m_maxDistance : LocationBooster.WorldRadius.Value;
 
-                if (mode == BoosterMode.Force)  { __result = BoosterForce.GenerateDonut(min, max); BoosterDiagnostics.FilterAcceptedZones++; return false; }
-                if (mode == BoosterMode.Filter)  { __result = BoosterFilter.GenerateSieve(min, max, LocationBooster.WorldRadius.Value); BoosterDiagnostics.FilterAcceptedZones++; return false; }
+                if (mode == BoosterMode.Force) { __result = BoosterForce.GenerateDonut(min, max); BoosterDiagnostics.FilterAcceptedZones++; return false; }
+                if (mode == BoosterMode.Filter) { __result = BoosterFilter.GenerateSieve(min, max, LocationBooster.WorldRadius.Value); BoosterDiagnostics.FilterAcceptedZones++; return false; }
 
                 if (mode == BoosterMode.SurveyPlus)
                 {
@@ -129,7 +125,6 @@ namespace LocationBudgetBooster
                         return false;
                     }
 
-                    // Fallback to cached zone or zero if scan fails
                     __result = BoosterReflection.CachedOccupiedZone ?? Vector2i.zero;
                     return false;
                 }
@@ -146,9 +141,7 @@ namespace LocationBudgetBooster
             {
                 yield return codes[i];
                 if (codes[i].opcode == OpCodes.Stfld && codes[i].operand is FieldInfo fi && fi.FieldType == typeof(ZoneLocation))
-                {
                     yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(BoosterPatches), nameof(BoosterPatches.ResetAndPrepareForNewLocation)));
-                }
             }
         }
 
@@ -160,7 +153,6 @@ namespace LocationBudgetBooster
             string lastLogString = "";
             FieldInfo limitFieldFound = null;
 
-            // --- PASS 1: Pre-scan (CRITICAL: Populates Reflection Dictionaries) ---
             for (int i = 0; i < codes.Count; i++)
             {
                 var instruction = codes[i];
@@ -179,13 +171,11 @@ namespace LocationBudgetBooster
                     }
                 }
                 if (instruction.opcode == OpCodes.Ldfld && limitFieldFound != null && (instruction.operand as FieldInfo) == limitFieldFound && i >= 2 && codes[i - 2].opcode == OpCodes.Ldfld)
-                {
                     BoosterReflection.CounterFields[currentType] = codes[i - 2].operand as FieldInfo;
-                }
+
                 if (instruction.opcode == OpCodes.Call && instruction.operand is MethodInfo mi && mi.Name == "CountNrOfLocation" && i + 1 < codes.Count && codes[i + 1].opcode == OpCodes.Stfld)
-                {
                     BoosterReflection.PlacedFields[currentType] = codes[i + 1].operand as FieldInfo;
-                }
+
                 if (instruction.opcode == OpCodes.Ldc_I4_S && Convert.ToInt32(instruction.operand) == 20)
                 {
                     if (i > 0 && codes[i - 1].opcode == OpCodes.Ldfld) BoosterReflection.InnerCounterFields[currentType] = codes[i - 1].operand as FieldInfo;
@@ -198,7 +188,6 @@ namespace LocationBudgetBooster
                 }
             }
 
-            // --- PASS 2: Modify ---
             int outerMult = LocationBooster.OuterMultiplier.Value;
             int innerMult = LocationBooster.InnerMultiplier.Value;
             int getRandomZoneIndex = codes.FindIndex(c => c.opcode == OpCodes.Call && c.operand is MethodInfo mi && mi.Name == "GetRandomZone");
@@ -209,7 +198,6 @@ namespace LocationBudgetBooster
                 var opcode = instruction.opcode;
                 var operand = instruction.operand;
 
-                // 1. REPLACEMENTS
                 if (opcode == OpCodes.Ldc_I4 && operand is int val && (val == 100000 || val == 200000))
                 {
                     yield return instruction;
@@ -226,7 +214,6 @@ namespace LocationBudgetBooster
                     }
                 }
 
-                // 2. INJECTIONS
                 if (i == getRandomZoneIndex)
                 {
                     yield return new CodeInstruction(OpCodes.Ldarg_0);
@@ -255,7 +242,6 @@ namespace LocationBudgetBooster
 
                 yield return instruction;
 
-                // Progress Log
                 if (opcode == OpCodes.Stfld && BoosterReflection.CounterFields.TryGetValue(currentType, out var cf) && (operand as FieldInfo) == cf)
                 {
                     if (LocationBooster.ProgressInterval.Value > 0)
@@ -265,7 +251,6 @@ namespace LocationBudgetBooster
                     }
                 }
 
-                // Heartbeat Log
                 if (opcode == OpCodes.Call && operand is MethodInfo miRP && miRP.Name == "GetRandomPointInZone")
                 {
                     yield return new CodeInstruction(OpCodes.Ldarg_0);
@@ -346,7 +331,7 @@ namespace LocationBudgetBooster
                     }
                 }
 
-                next_instr:;
+            next_instr:;
             }
         }
     }
