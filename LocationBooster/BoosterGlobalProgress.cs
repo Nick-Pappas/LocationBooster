@@ -183,16 +183,14 @@ namespace LocationBudgetBooster
             bool hasQueued = _relaxationQueued.Count > 0;
             bool hasPending = _relaxationPending.Count > 0;
 
-            // Priority: Red > Amber > Yellow > Blue > Green
+            // Priority: Red > Yellow > Blue > Green
             string color;
-            if (_failedVitals.Count > 0 || hasPending)
-                color = "#FF4444";  // Red — confirmed vital failure OR active retry
-            else if (hasQueued)
-                color = "#FF8C00";  // Amber — relaxed, waiting for end-of-queue retry
+            if (_failedVitals.Count > 0)
+                color = "#FF4444";  // Red — vital failure
             else if (_failedSecondary.Count > 0)
                 color = "#FFB75E";  // Yellow — secondary shortfall
             else if (hasRelaxations)
-                color = "#55AAFF";  // Blue — relaxation succeeded, all clear
+                color = "#55AAFF";  // Blue — relaxation resolved
             else
                 color = "#55FF55";  // Green
 
@@ -369,6 +367,7 @@ namespace LocationBudgetBooster
 
             BoosterDiagnostics.WriteTimestampedLog(summary.ToString(), logLevel);
 
+            BoosterDiagnostics.DumpPlacementsToFile();
             BoosterUI.DestroyInstance();
             _initialized = false;
         }

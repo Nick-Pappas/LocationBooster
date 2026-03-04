@@ -71,6 +71,39 @@ namespace LocationBudgetBooster
 
         public static void Dispose() => _logWriter?.Close();
 
+        public static void DumpPlacementsToFile()
+        {
+            if (ZoneSystem.instance == null) return;
+            if (!LocationBooster.WriteToFile.Value) return;
+
+            try
+            {
+                string path = Path.Combine(Paths.BepInExRootPath, "LocationBooster_PlacementCoords.log");
+                using (var writer = new StreamWriter(path, false))
+                {
+                    writer.WriteLine("=== Final Location Placements ===");
+                    var counters = new Dictionary<string, int>();
+                    var sorted = ZoneSystem.instance.m_locationInstances.Values
+                        .OrderBy(loc => loc.m_location.m_prefabName)
+                        .ToList();
+
+                    foreach (var inst in sorted)
+                    {
+                        string name = inst.m_location.m_prefabName;
+                        if (!counters.ContainsKey(name)) counters[name] = 0;
+                        counters[name]++;
+                        Vector3 pos = inst.m_position;
+                        writer.WriteLine($"{name}_{counters[name]} ({pos.x:F1}, {pos.y:F1}, {pos.z:F1})");
+                    }
+                }
+                WriteLog($"[Booster] Dumped {ZoneSystem.instance.m_locationInstances.Count} placements to LocationBooster_PlacementCoords.log");
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"[Booster] Failed to dump placement coords: {ex.Message}", LogLevel.Error);
+            }
+        }
+
         public static void WriteLog(string message, LogLevel level = LogLevel.Info)
         {
             LocationBooster.Log.Log(level, message);
@@ -141,6 +174,7 @@ namespace LocationBudgetBooster
         {
             if (altitude < GlobalMinAltitudeSeen) GlobalMinAltitudeSeen = altitude;
             if (altitude > GlobalMaxAltitudeSeen) GlobalMaxAltitudeSeen = altitude;
+            BoosterSurveyPlus.RecordAltitude(altitude);
         }
 
         public static void IncrementShadow(object instance, string fieldName)
@@ -300,7 +334,7 @@ namespace LocationBudgetBooster
                 return;
             }
 
-            // Permanent failure — fast-forward progress bar for all remaining unplaced instances.
+            // Permanent failure  - fast-forward progress bar for all remaining unplaced instances. fast-forward progress bar for all remaining unplaced instances.
             int remaining = data.Loc.m_quantity - data.Placed;
             for (int i = 0; i < remaining; i++)
                 BoosterGlobalProgress.IncrementProcessed(false);

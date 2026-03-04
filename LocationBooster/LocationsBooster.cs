@@ -30,6 +30,8 @@ namespace LocationBudgetBooster
         public static ConfigEntry<int> SurveyScanResolution;
         public static ConfigEntry<int> SurveyVisitLimit;
         public static ConfigEntry<bool> EnableAltitudeMapping;
+        public static ConfigEntry<float> ExplorationRate;
+        public static ConfigEntry<bool> ReshuffleOnExhaustion;
 
         // 3. Relaxation (Smart Recovery)
         public static ConfigEntry<int> MaxRelaxationAttempts;
@@ -70,6 +72,12 @@ namespace LocationBudgetBooster
 
             EnableAltitudeMapping = Config.Bind("2 - Survey Strategy", "EnableAltitudeMapping", true,
                 "If True, samples terrain height during the survey (~10s overhead). Allows 'Smart Relaxation' to instantly fix altitude failures. If False, relaxation is iterative (slower generation, faster startup).");
+
+            ExplorationRate = Config.Bind("2 - Survey Strategy", "ExplorationRate", 0.25f,
+                "0.0 to 1.0. Fraction of GetZone calls that ignore altitude knowledge to explore random map areas. Prevents POI clustering and builds global vision. (0.25 = 25% Explore, 75% Exploit). Only active when EnableAltitudeMapping=True.");
+
+            ReshuffleOnExhaustion = Config.Bind("2 - Survey Strategy", "ReshuffleOnExhaustion", false,
+                "If True, reshuffles the candidate zone list each time it is fully traversed. Adds spatial variance across VisitLimit passes at negligible cost. If False, the same traversal order repeats each pass.");
 
             // --- SECTION 3: RELAXATION ---
             MaxRelaxationAttempts = Config.Bind("3 - Relaxation", "MaxAttempts", 4,
